@@ -38,43 +38,6 @@ _RESPONSE_SCHEMA = {
 }
 
 
-def _load_env_keys() -> list[str]:
-    keys: list[str] = []
-    # 1. Numbered keys: GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3, ...
-    numbered: list[tuple[int, str]] = []
-    for k, v in os.environ.items():
-        if k.startswith("GEMINI_API_KEY_") and v.strip():
-            suffix = k[len("GEMINI_API_KEY_"):]
-            if suffix.isdigit():
-                numbered.append((int(suffix), v.strip()))
-    numbered.sort(key=lambda x: x[0])
-    for _, val in numbered:
-        if val not in keys:
-            keys.append(val)
-
-    # 2. Backward-compatible fallback: GEMINI_API_KEY
-    fallback = os.environ.get("GEMINI_API_KEY", "").strip()
-    if fallback and fallback not in keys:
-        keys.append(fallback)
-
-    return keys
-
-
-def _sanitize_gemini_message(msg: str, api_keys: list[str], user_message: str) -> str:
-    """Scrub sensitive keys, user text, and control characters, and length-limit to 150 chars."""
-    if not msg:
-        return ""
-    for k in api_keys:
-        if k and k in msg:
-            msg = msg.replace(k, "[REDACTED_KEY]")
-    if user_message and user_message in msg:
-        msg = msg.replace(user_message, "[REDACTED_INPUT]")
-    cleaned = " ".join(msg.split())
-    if len(cleaned) > 150:
-        cleaned = cleaned[:147] + "..."
-    return cleaned
-
-
 class GeminiJudge:
     """.assess(message) -> {"attack", "confidence", "category", "reasoning", "risk_score",
     "intent"}. "intent" is one of bankguard/intent.py's intent names, or "other" — used by
@@ -83,31 +46,20 @@ class GeminiJudge:
 
     `timeout` is the TOTAL wall-clock budget across all attempts (default 7s), not per-call —
     this matters because api/check.py runs as a Vercel function with a 10s limit, so the whole
-    judge call (including retries and key failovers) must finish with margin to spare.
-    Supports key rotation across GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3 with
-    GEMINI_API_KEY as fallback. On any HTTP 429 response (including daily quota exhaustion),
-    fails over to the next untried configured key for that request.
-    Caches results in memory keyed by a hash of the message.
+    judge call (including a retry) must finish with margin to spare. One retry on HTTP 429 or a
+    socket timeout, each attempt getting half the remaining budget, honoring `Retry-After` on
+    429 (capped to what's left). Caches results in memory keyed by a hash of the message (not
+    the message itself, so raw user text isn't retained longer than necessary in process memory
+    beyond the request).
     """
 
     API_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-    def __init__(self, api_key: str | None = None, api_keys: list[str] | None = None,
-                 model: str | None = None, timeout: float = 7.0, max_retries: int = 1,
-                 prompt_path: Path = PROMPT_PATH):
-        if api_keys is not None:
-            keys = [k.strip() for k in api_keys if k and k.strip()]
-        elif api_key is not None:
-            keys = [api_key.strip()] if api_key.strip() else []
-        else:
-            keys = _load_env_keys()
-
-        if not keys:
+    def __init__(self, api_key: str | None = None, model: str | None = None,
+                 timeout: float = 7.0, max_retries: int = 1, prompt_path: Path = PROMPT_PATH):
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY is not set")
-
-        self.api_keys = keys
-        self.api_key = keys[0]
-        self._key_index = 0
         self.model = model or os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest")
         self.timeout = timeout
         self.max_retries = max_retries
@@ -136,19 +88,18 @@ class GeminiJudge:
             },
         }
         data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
+        )
 
         deadline = time.monotonic() + self.timeout
-        retries = 0
-        failover_count = 0
-        attempted_key_indices: set[int] = set()
-        current_key_idx = self._key_index % len(self.api_keys)
-
+        attempt = 0
         while True:
             t0 = time.monotonic()
             remaining = deadline - t0
             if remaining <= 0:
-                logger.error("Gemini judge call exceeded timeout budget timeout=%.2fs failovers=%d retries=%d",
-                             self.timeout, failover_count, retries)
+                logger.error("Gemini judge call exceeded timeout budget attempt=%d timeout=%.2fs", attempt, self.timeout)
                 exc = TimeoutError("judge call exceeded its total timeout budget")
                 exc.status_code = 408
                 exc.error_type = "timeout"
@@ -157,28 +108,13 @@ class GeminiJudge:
                 exc.is_transient = True
                 raise exc
 
-            attempted_key_indices.add(current_key_idx)
-            current_key = self.api_keys[current_key_idx]
-            self.api_key = current_key
-
-            has_untried_keys = len(attempted_key_indices) < len(self.api_keys)
-            has_retries_left = retries < self.max_retries
-            more_attempts_possible = has_untried_keys or has_retries_left
-
-            per_attempt_timeout = remaining / 2 if more_attempts_possible else remaining
-
-            req = urllib.request.Request(
-                url, data=data, method="POST",
-                headers={"Content-Type": "application/json", "x-goog-api-key": current_key},
-            )
+            per_attempt_timeout = remaining if attempt >= self.max_retries else remaining / 2
             try:
                 with urllib.request.urlopen(req, timeout=per_attempt_timeout) as resp:
                     raw_data = resp.read().decode("utf-8")
                     latency_ms = (time.monotonic() - t0) * 1000
                     payload = json.loads(raw_data)
-                logger.info("Gemini judge call succeeded model=%s key_index=%d latency_ms=%.1f failovers=%d retries=%d",
-                            self.model, current_key_idx, latency_ms, failover_count, retries)
-                self._key_index = current_key_idx
+                logger.info("Gemini judge call succeeded model=%s latency_ms=%.1f attempt=%d", self.model, latency_ms, attempt)
                 return self._parse(payload)
             except Exception as exc:
                 latency_ms = (time.monotonic() - t0) * 1000
@@ -201,7 +137,7 @@ class GeminiJudge:
                 )
 
                 if status_code == 429:
-                    msg_lower = (gemini_msg or "").lower()
+                    msg_lower = gemini_msg.lower()
                     if "daily" in msg_lower or "quota exceeded" in msg_lower or "per day" in msg_lower:
                         error_type = "quota_exhausted"
                         is_transient = False
@@ -228,51 +164,28 @@ class GeminiJudge:
                     error_type = "unknown"
                     is_transient = False
 
-                sanitized_msg = _sanitize_gemini_message(gemini_msg or str(exc), self.api_keys, message)
-
-                # Attach diagnostics to exception (API keys and raw inputs are NEVER attached or logged)
+                # Attach diagnostics to exception
                 exc.status_code = status_code
                 exc.error_type = error_type
                 exc.gemini_status = gemini_status
-                exc.gemini_message = sanitized_msg
+                exc.gemini_message = gemini_msg or str(exc)
                 exc.latency_ms = latency_ms
                 exc.is_transient = is_transient
 
-                # Log diagnostics without leaking API key, headers, or raw user text
+                # Log diagnostics without leaking API key or sensitive user text
                 logger.warning(
-                    "Gemini judge error model=%s key_index=%d status_code=%s error_type=%s gemini_status=%s message=%s latency_ms=%.1f failovers=%d retries=%d is_transient=%s",
-                    self.model, current_key_idx, status_code, error_type, gemini_status, sanitized_msg, latency_ms, failover_count, retries, is_transient
+                    "Gemini judge error model=%s status_code=%s error_type=%s gemini_status=%s message=%s latency_ms=%.1f attempt=%d is_transient=%s",
+                    self.model, status_code, error_type, gemini_status, gemini_msg, latency_ms, attempt, is_transient
                 )
 
-                # 429 failover to next untried key for this request (including daily quota exhaustion)
-                if status_code == 429 and has_untried_keys:
-                    next_idx = None
-                    for offset in range(1, len(self.api_keys)):
-                        candidate = (current_key_idx + offset) % len(self.api_keys)
-                        if candidate not in attempted_key_indices:
-                            next_idx = candidate
-                            break
-                    if next_idx is not None:
-                        logger.warning(
-                            "Gemini judge 429 on key_index=%d: failing over to key_index=%d model=%s",
-                            current_key_idx, next_idx, self.model
-                        )
-                        current_key_idx = next_idx
-                        self._key_index = next_idx
-                        failover_count += 1
-                        if (deadline - time.monotonic()) <= 0:
-                            raise exc
-                        continue
-
-                # Transient retries for timeouts, 5xx errors, or non-rotated rate limits
-                if not is_transient or retries >= self.max_retries:
+                if not is_transient or attempt >= self.max_retries:
                     raise exc
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise exc
 
-                delay = 0.5 * (2 ** retries)
+                delay = 0.5 * (2 ** attempt)
                 if status_code == 429 and isinstance(exc, urllib.error.HTTPError):
                     retry_after = exc.headers.get("Retry-After") if exc.headers else None
                     if retry_after:
@@ -283,7 +196,7 @@ class GeminiJudge:
                 delay = min(delay, max(remaining - 0.1, 0.0))
                 if delay > 0:
                     time.sleep(delay)
-                retries += 1
+                attempt += 1
                 continue
 
     @staticmethod
