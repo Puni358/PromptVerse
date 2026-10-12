@@ -21,6 +21,7 @@ _INTENTS = [
     ("transfer_funds", True, re.compile(
         r"\b(?:transfer|wire|remit|neft|rtgs|imps|upi)\b|"
         r"\b(?:send|move|pay|give)\b[^.\n]{0,30}(?:\b(?:money|funds|amount|rupees|dollars|euros|inr|usd|rs\.?)\b|[$₹€£]\s?\d)|"
+        r"\b(?:send|move|pay|give)\b\s+\d+(?:,\d+)*(?:\.\d+)?\s*(?:to\b|from\b|into\b)|"
         # Hindi, Kannada, Tamil, Telugu, Hinglish, Spanish — common "send/transfer money" phrasings.
         r"पैसे?\s*(?:भेजो|भेजें|भेजना|ट्रांसफर)|रुपये?\s*भेज|ट्रांसफर\s*(?:करो|करें|कीजिए)|"
         r"ಹಣ\s*ಕಳುಹಿಸ|ವರ್ಗಾವಣೆ\s*ಮಾಡ|"
@@ -97,6 +98,27 @@ def extract_entities(text: str) -> dict:
             break
     refs = ["****" + n[-4:] for n in re.findall(r"\b\d{9,18}\b", text)][:3]  # never echo full numbers
     return {"amounts": amounts, "account_refs_last4": refs}
+
+
+_SOURCE_PHRASE_RE = re.compile(r"\bfrom\b", re.I)
+# "to" followed by something other than the infinitive use ("want to transfer", "need to pay")
+# signals an actual destination clause ("to my savings account", "to bob"); an account-number-
+# shaped token on its own also counts even without a "to".
+_TARGET_PHRASE_RE = re.compile(
+    r"\bto\s+(?!transfer\b|pay\b|send\b|move\b|wire\b|give\b|check\b|do\b|make\b)\S|\b\d{6,18}\b", re.I)
+
+
+def missing_transfer_details(intent_name: str, text: str) -> bool:
+    """True when a transfer_funds message lacks either a source account ("from ...")
+    or a destination ("to ...", an account number), or when a pay_bill message lacks
+    a source account ("from ...").
+    Always False for any other intent; this never affects risk scoring,
+    it only drives the UI's "more details needed" prompt (see Firewall._check())."""
+    if intent_name == "transfer_funds":
+        return not _SOURCE_PHRASE_RE.search(text) or not _TARGET_PHRASE_RE.search(text)
+    if intent_name == "pay_bill":
+        return not _SOURCE_PHRASE_RE.search(text)
+    return False
 
 
 def classify_intent(plain_text: str) -> dict:

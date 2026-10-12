@@ -317,7 +317,11 @@
     els.actionResult.className = "action-result " + (safe ? "safe" : "blocked");
     if (safe) {
       const intentName = (v.intent && v.intent.name) || "unknown";
-      if (v.intent && v.intent.high_risk) {
+      if (v.missing_details) {
+        els.actionResult.innerHTML =
+          "<strong>More details needed:</strong> which account to send from, and who/which " +
+          "account to send to?";
+      } else if (v.intent && v.intent.high_risk) {
         els.actionResult.innerHTML =
           `<strong>Step-up verification (OTP) required</strong> for ${escapeHtml(intentName)}`;
       } else {

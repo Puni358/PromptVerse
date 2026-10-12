@@ -36,6 +36,24 @@ class BankActionCard(unittest.TestCase):
         low_risk_branch = body.split("} else {")[1]
         self.assertIn("Action executed:", low_risk_branch)
 
+    def test_missing_details_branch_takes_priority_over_otp_message(self):
+        match = re.search(r"function renderActionResult\(v\)\s*\{(.*?)\n  \}", self.source, re.S)
+        self.assertIsNotNone(match, "could not locate renderActionResult() body")
+        body = match.group(1)
+
+        self.assertIn("More details needed", body)
+        self.assertIn("v.missing_details", body)
+
+        # "missing_details" must be checked (and its branch must come) before the high-risk/OTP
+        # check, so an incomplete high-risk request shows "more details needed" instead of OTP.
+        missing_details_pos = body.index("v.missing_details")
+        high_risk_pos = body.index("v.intent && v.intent.high_risk")
+        self.assertLess(missing_details_pos, high_risk_pos)
+
+        missing_details_branch = body.split("if (v.missing_details)")[1].split("} else if")[0]
+        self.assertNotIn("Step-up verification", missing_details_branch)
+        self.assertNotIn("Action executed", missing_details_branch)
+
 
 if __name__ == "__main__":
     unittest.main()

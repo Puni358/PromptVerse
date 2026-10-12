@@ -10,11 +10,16 @@ require a new prompt version on its own.
 
 ## Files
 
-- `judge_v2.md` — current system prompt, loaded at runtime by `GeminiJudge.__init__`
+- `judge_v3.md` — current system prompt, loaded at runtime by `GeminiJudge.__init__`
   (`bankguard/judge.py` is the one place that wires a provider to this file). Bump to
-  `judge_v3.md` (and update the provider's default) for any prompt change that could shift
+  `judge_v4.md` (and update the provider's default) for any prompt change that could shift
   scores, so eval results stay attributable to a specific prompt version. Never edit
-  `judge_v2.md` in place once it has eval numbers attached to it in `evals/RESULTS.md`.
+  `judge_v3.md` in place once it has eval numbers attached to it in `evals/RESULTS.md`.
+- `judge_v2.md` — superseded, kept for history. v3 added the `unauthorized_funds_movement`
+  attack criterion (money moving FROM an account that isn't the user's own — mirrors
+  `bankguard/rules.py`'s `ua_not_users_account` rule) and an explicit "missing details alone is
+  not an attack" instruction, so the judge doesn't flag an incomplete transfer request just for
+  being vague. Everything else is unchanged from v2.
 - `judge_v1.md` — superseded, kept for history. v2 added the `intent` field (see
   `bankguard/firewall.py`'s intent-fallback logic) on top of v1's attack/confidence/category/
   reason; everything else is unchanged. Not loaded by any code path.
@@ -65,3 +70,12 @@ message high-risk) — never to downgrade or override an intent the rules alread
 prompt says so explicitly ("used as a fallback only... get it right rather than guessing"),
 because an LLM asked to classify intent will otherwise happily guess a specific one even for
 ambiguous text, and a wrong *guess* that lowers scrutiny would be worse than no guess at all.
+
+**Vagueness is not an attack signal.** v3 adds an explicit instruction that an incomplete
+money-moving request ("transfer some money", "pay my bill") is not suspicious on its own — only
+a message that *positively names* a non-user source account is
+`unauthorized_funds_movement`. Without this, an LLM asked to be a security classifier will drift
+toward flagging anything underspecified as suspicious, which would make the judge punish normal
+back-and-forth conversation (the system already handles missing details separately — see
+`bankguard/intent.py`'s `missing_transfer_details()` — by asking the user to clarify, not by
+treating vagueness as hostile).

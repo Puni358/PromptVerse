@@ -1,6 +1,6 @@
 """Google Gemini judge provider — plain REST via urllib, no google/anthropic SDK dependency
-(bankguard stays stdlib-only). The system prompt lives in prompts/judge_v2.md (see
-prompts/README.md; judge_v1.md is kept for history, not deleted). Selected by
+(bankguard stays stdlib-only). The system prompt lives in prompts/judge_v3.md (see
+prompts/README.md; judge_v1.md/judge_v2.md are kept for history, not deleted). Selected by
 bankguard.judge.build_judge() when LLM_PROVIDER=gemini (the default) and GEMINI_API_KEY is set.
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "judge_v2.md"
+PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "judge_v3.md"
 
 # Mirrors bankguard/intent.py's intent names (plus "other"). Kept as a local, explicit list
 # rather than importing bankguard.intent, so the judge's output contract doesn't silently

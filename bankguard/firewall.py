@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .intent import classify_intent
+from .intent import classify_intent, missing_transfer_details
 from .normalize import analyze, contains_non_latin_script
 from .rules import RULES, SQUASHED_PHRASES
 
@@ -158,8 +158,12 @@ class Firewall:
             "pipeline": "hybrid" if self.judge is not None else "rules_only",
         }
 
+        # Informational only — never affects risk/threshold/blocked. Computed after any
+        # judge-intent fallback above, so it reflects whichever intent the verdict settled on.
+        missing_details = (not blocked) and missing_transfer_details(intent["name"], message)
+
         return self._verdict(blocked, risk, threshold, hits, intent, reasons_extra, message, source,
-                             code, layers)
+                             code, layers, missing_details)
 
     def _scan(self, a) -> list[Hit]:
         hits: dict[str, Hit] = {}
@@ -205,7 +209,7 @@ class Firewall:
                              message if isinstance(message, str) else "", source, code, layers)
 
     def _verdict(self, blocked, risk, threshold, hits, intent, reasons, message, source, code=None,
-                 layers=None) -> dict:
+                 layers=None, missing_details=False) -> dict:
         cfg = self.cfg
         risk = round(min(max(risk, 0.0), 1.0), 3)
         seen, reason_list = set(), []
@@ -241,6 +245,7 @@ class Firewall:
             "firewall_version": VERSION,
             "layers": layers or {"rules": {"risk_score": risk, "blocked": blocked},
                                   "llm_judge": {"used": False}, "pipeline": "rules_only"},
+            "missing_details": bool(missing_details),
         }
         if cfg.verbose:
             out["threats"] = [{"rule": h.id, "category": h.category, "weight": h.weight,
