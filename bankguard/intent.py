@@ -1,0 +1,77 @@
+"""Banking-intent allowlist. Tells us *what* the user wants so we can apply a stricter
+threshold to money-moving / account-changing actions."""
+from __future__ import annotations
+
+import re
+
+_FLAGS = re.I | re.M
+
+# (name, high_risk, pattern)  -- order matters: first match is the primary intent.
+_INTENTS = [
+    ("pay_bill", True, re.compile(
+        r"\b(?:pay|settle|clear|pay off|payment)\b[^.\n]{0,30}\b(?:bill|bills|invoice|emi|premium|rent|dues|credit card|"
+        r"electricity|water|gas|utility|recharge|fee|fees|tuition)\b|\b(?:bill\s*pay(?:ment)?|recharge)\b", _FLAGS)),
+    ("transfer_funds", True, re.compile(
+        r"\b(?:transfer|wire|remit|neft|rtgs|imps|upi)\b|"
+        r"\b(?:send|move|pay|give)\b[^.\n]{0,30}(?:\b(?:money|funds|amount|rupees|dollars|euros|inr|usd|rs\.?)\b|[$₹€£]\s?\d)", _FLAGS)),
+    ("update_account_details", True, re.compile(
+        r"\b(?:change|update|edit|modify|add|remove|set|reset)\b[^.\n]{0,25}\b(?:address|phone|mobile|email|beneficiary|"
+        r"payee|nominee|password|pin|username|login)\b", _FLAGS)),
+    ("dispute_transaction", False, re.compile(
+        r"\b(?:dispute|chargeback|unauthori[sz]ed (?:charge|transaction)|wrong charge|refund)\b", _FLAGS)),
+    ("card_services", False, re.compile(
+        r"\b(?:block|freeze|unblock|activate|cancel|replace|report)\b[^.\n]{0,20}\b(?:card|debit|credit)\b|"
+        r"\b(?:lost|stolen)\b[^.\n]{0,15}\bcard\b|\bcard\b[^.\n]{0,20}\b(?:lost|stolen|blocked|limit)\b", _FLAGS)),
+    ("check_balance", False, re.compile(
+        r"\b(?:balance|how much (?:money|do i have)|available funds)\b", _FLAGS)),
+    ("transaction_history", False, re.compile(
+        r"\b(?:transactions?|statements?|history|passbook|mini statement|spent|spending)\b", _FLAGS)),
+    ("loan_enquiry", False, re.compile(
+        r"\b(?:loan|emi|mortgage|interest rate|credit limit|eligib\w+)\b", _FLAGS)),
+    ("account_services", False, re.compile(
+        r"\b(?:open|close|create)\b[^.\n]{0,15}\b(?:account|fd|fixed deposit|rd|savings)\b|"
+        r"\b(?:fixed deposit|recurring deposit|chequebook|cheque book|account type)\b", _FLAGS)),
+    ("branch_atm_info", False, re.compile(r"\b(?:branch|atm|ifsc|swift|working hours|timings?)\b", _FLAGS)),
+    ("exchange_rates", False, re.compile(r"\b(?:exchange rate|forex|currency rate|convert)\b", _FLAGS)),
+    ("customer_support", False, re.compile(r"\b(?:help|support|complaint|agent|human|customer care)\b", _FLAGS)),
+]
+
+_AMT = re.compile(
+    r"(?P<cur>rs\.?|inr|usd|eur|gbp|[$₹€£])?\s?(?P<num>\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"\s?(?P<mult>k|lakhs?|crore|million)?(?:\s?(?P<cur2>rupees|dollars|euros|usd|inr|eur|gbp))?\b", re.I)
+_MULT = {"k": 1e3, "lakh": 1e5, "lakhs": 1e5, "crore": 1e7, "million": 1e6}
+_CUR = {"$": "USD", "usd": "USD", "dollars": "USD", "₹": "INR", "rs": "INR", "rs.": "INR", "inr": "INR",
+        "rupees": "INR", "€": "EUR", "eur": "EUR", "euros": "EUR", "£": "GBP", "gbp": "GBP"}
+
+
+def extract_entities(text: str) -> dict:
+    amounts = []
+    for m in _AMT.finditer(text):
+        cur = (m.group("cur") or m.group("cur2") or "").lower()
+        if not cur:
+            continue
+        try:
+            val = float(m.group("num").replace(",", ""))
+        except ValueError:
+            continue
+        mult = (m.group("mult") or "").lower()
+        val *= _MULT.get(mult, 1)
+        amounts.append({"value": val, "currency": _CUR.get(cur, cur.upper())})
+        if len(amounts) == 3:
+            break
+    refs = ["****" + n[-4:] for n in re.findall(r"\b\d{9,18}\b", text)][:3]  # never echo full numbers
+    return {"amounts": amounts, "account_refs_last4": refs}
+
+
+def classify_intent(plain_text: str) -> dict:
+    matched = [(name, hr) for name, hr, pat in _INTENTS if pat.search(plain_text)]
+    if not matched:
+        return {"name": "unknown", "confidence": 0.0, "high_risk": False, "detected": [],
+                "entities": extract_entities(plain_text)}
+    return {
+        "name": matched[0][0],
+        "confidence": 0.9 if len(matched) == 1 else 0.7,
+        "high_risk": any(hr for _, hr in matched),   # ANY money-moving intent raises scrutiny
+        "detected": [n for n, _ in matched],
+        "entities": extract_entities(plain_text),
+    }

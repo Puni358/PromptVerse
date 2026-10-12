@@ -1,0 +1,179 @@
+"""The firewall engine. `Firewall.check(message)` always returns a JSON-serialisable dict and never raises
+(fail-closed: any internal error => status "blocked")."""
+from __future__ import annotations
+
+import hashlib
+import time
+import uuid
+from dataclasses import dataclass
+from typing import Any, Optional
+
+from .intent import classify_intent
+from .normalize import analyze
+from .rules import RULES, SQUASHED_PHRASES
+
+VERSION = "1.0.0"
+_PLAIN_VARIANTS = {"plain", "leet"}
+
+
+@dataclass
+class Config:
+    block_threshold: float = 0.60       # normal requests
+    high_risk_threshold: float = 0.40   # transfers, bill-pay, profile changes: stricter
+    untrusted_threshold: float = 0.35   # text that came from documents/tools/web, not the user
+    max_length: int = 2000
+    strict_intent: bool = False         # True => block anything that isn't a recognised banking request
+    verbose: bool = True                # False => hide matched text/rule ids from the caller (production)
+    judge_band_low: float = 0.20        # optional LLM judge only runs for scores in [low, threshold)
+
+
+@dataclass
+class Hit:
+    id: str
+    category: str
+    weight: float
+    description: str
+    variant: str = "plain"
+    matched: str = ""
+
+
+class Firewall:
+    def __init__(self, config: Optional[Config] = None, judge: Any = None):
+        self.cfg = config or Config()
+        self.judge = judge  # optional object with .assess(message) -> float in [0,1]
+
+    # ------------------------------------------------------------------ public
+    def check(self, message: Any, *, source: str = "user") -> dict:
+        t0 = time.perf_counter()
+        try:
+            verdict = self._check(message, source)
+        except Exception as exc:  # fail closed
+            verdict = self._verdict(blocked=True, risk=1.0, threshold=self.cfg.block_threshold, hits=[],
+                                    intent=None, reasons=["internal_error: request blocked as a precaution"],
+                                    message=message if isinstance(message, str) else "", source=source,
+                                    code="internal_error")
+            verdict["error"] = type(exc).__name__
+        verdict["latency_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        return verdict
+
+    # ------------------------------------------------------------------ internals
+    def _check(self, message: Any, source: str) -> dict:
+        cfg = self.cfg
+        if not isinstance(message, str):
+            return self._early(message, source, "invalid_input", "Message must be a string")
+        if not message.strip():
+            return self._early(message, source, "empty_message", "Message is empty")
+        if len(message) > cfg.max_length:
+            return self._early(message, source, "message_too_long",
+                               f"Message exceeds {cfg.max_length} characters")
+
+        analysis = analyze(message)
+        hits = self._scan(analysis)
+        intent = classify_intent(analysis.plain)
+
+        threshold = cfg.high_risk_threshold if intent["high_risk"] else cfg.block_threshold
+        if source != "user":
+            threshold = min(threshold, cfg.untrusted_threshold)
+
+        risk = self._score(hits)
+
+        reasons_extra = []
+        if self.judge is not None and cfg.judge_band_low <= risk < threshold:
+            try:
+                risk = max(risk, float(self.judge.assess(message)))
+                reasons_extra.append("llm_judge consulted")
+            except Exception:
+                reasons_extra.append("llm_judge unavailable")
+                if intent["high_risk"]:  # fail closed on money-moving actions
+                    risk = max(risk, threshold)
+
+        blocked = risk >= threshold
+        code = None
+        if not blocked and cfg.strict_intent and intent["name"] == "unknown":
+            blocked, code = True, "no_recognized_banking_intent"
+            reasons_extra.append("Not a recognised banking request (strict mode)")
+
+        return self._verdict(blocked, risk, threshold, hits, intent, reasons_extra, message, source, code)
+
+    def _scan(self, a) -> list[Hit]:
+        hits: dict[str, Hit] = {}
+        obfuscated = False
+        for vname, text in a.variants.items():
+            for rule in RULES:
+                if rule.id in hits:
+                    continue
+                m = rule.pattern.search(text)
+                if m:
+                    hits[rule.id] = Hit(rule.id, rule.category, rule.weight, rule.description, vname, m.group(0)[:80])
+                    if vname not in _PLAIN_VARIANTS:
+                        obfuscated = True
+        for vname, sq in a.squashed.items():
+            for phrase, cat, w in SQUASHED_PHRASES:
+                key = f"sq_{phrase}"
+                if phrase in sq and key not in hits:
+                    hits[key] = Hit("squashed_phrase", cat, w, "Attack phrase hidden by splitting characters", vname, phrase)
+        for fid, cat, w, desc in a.flags:
+            hits[fid] = Hit(fid, cat, w, desc, "structure")
+        if obfuscated:
+            hits["obfuscated_payload"] = Hit("obfuscated_payload", "obfuscation", 0.5,
+                                             "Attack text was only visible after decoding (base64/hex/ROT13/reversed/URL)",
+                                             "decoded")
+        return sorted(hits.values(), key=lambda h: -h.weight)
+
+    @staticmethod
+    def _score(hits: list[Hit]) -> float:
+        """Max weight per category, noisy-OR across categories."""
+        per_cat: dict[str, float] = {}
+        for h in hits:
+            per_cat[h.category] = max(per_cat.get(h.category, 0.0), h.weight)
+        safe = 1.0
+        for w in per_cat.values():
+            safe *= (1.0 - w)
+        return 1.0 - safe
+
+    def _early(self, message, source, code, reason) -> dict:
+        return self._verdict(True, 1.0, self.cfg.block_threshold, [], None, [reason],
+                             message if isinstance(message, str) else "", source, code)
+
+    def _verdict(self, blocked, risk, threshold, hits, intent, reasons, message, source, code=None) -> dict:
+        cfg = self.cfg
+        risk = round(min(max(risk, 0.0), 1.0), 3)
+        seen, reason_list = set(), []
+        for h in hits:
+            if h.description not in seen and len(reason_list) < 5:
+                seen.add(h.description)
+                reason_list.append(h.description)
+        reason_list += [r for r in reasons if r not in reason_list]
+        if not reason_list:
+            reason_list = ["No threats detected"]
+        if not blocked and hits:
+            reason_list.insert(0, "Weak signals only, below block threshold")
+
+        if code is None and blocked:
+            top = hits[0].category if hits else "policy"
+            code = f"blocked_{top}"
+        if not blocked:
+            code = "ok"
+
+        out = {
+            "request_id": uuid.uuid4().hex[:12],
+            "status": "blocked" if blocked else "safe",
+            "action": "block" if blocked else "allow",
+            "code": code,
+            "risk_score": risk,
+            "risk_level": "high" if risk >= 0.6 else "medium" if risk >= 0.3 else "low",
+            "threshold": threshold,
+            "source": source,
+            "intent": intent,
+            "categories": sorted({h.category for h in hits}),
+            "reasons": reason_list,
+            "message_sha256": hashlib.sha256(message.encode("utf-8", "ignore")).hexdigest()[:16],
+            "firewall_version": VERSION,
+        }
+        if cfg.verbose:
+            out["threats"] = [{"rule": h.id, "category": h.category, "weight": h.weight,
+                               "variant": h.variant, "matched": h.matched} for h in hits]
+        else:  # don't teach an attacker which rule fired
+            out["reasons"] = ["Request blocked by security policy"] if blocked else ["OK"]
+            out.pop("categories")
+        return out
