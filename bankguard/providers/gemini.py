@@ -40,9 +40,11 @@ _RESPONSE_SCHEMA = {
 
 class GeminiJudge:
     """.assess(message) -> {"attack", "confidence", "category", "reasoning", "risk_score",
-    "intent"}. "intent" is one of bankguard/intent.py's intent names, or "other" — used by
-    Firewall._check() only as a fallback when the rules' own intent classifier found nothing
-    (see bankguard/firewall.py).
+    "intent", "prompt_version"}. "intent" is one of bankguard/intent.py's intent names, or
+    "other" — used by Firewall._check() only as a fallback when the rules' own intent
+    classifier found nothing (see bankguard/firewall.py). "prompt_version" (e.g. "v3") says
+    which prompts/judge_vN.md produced this verdict, so a verdict is attributable to a specific
+    prompt even after the default is bumped.
 
     `timeout` is the TOTAL wall-clock budget across all attempts (default 7s), not per-call —
     this matters because api/check.py runs as a Vercel function with a 10s limit, so the whole
@@ -64,6 +66,7 @@ class GeminiJudge:
         self.timeout = timeout
         self.max_retries = max_retries
         self.system_prompt = prompt_path.read_text(encoding="utf-8")
+        self.prompt_version = prompt_path.stem.removeprefix("judge_")  # e.g. "judge_v3.md" -> "v3"
         self._cache: dict[str, dict] = {}
 
     def assess(self, message: str) -> dict:
@@ -72,6 +75,7 @@ class GeminiJudge:
         if cached is not None:
             return cached
         result = self._call(message)
+        result["prompt_version"] = self.prompt_version
         self._cache[cache_key] = result
         return result
 

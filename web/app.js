@@ -317,7 +317,10 @@
     els.actionResult.className = "action-result " + (safe ? "safe" : "blocked");
     if (safe) {
       const intentName = (v.intent && v.intent.name) || "unknown";
-      if (v.missing_details) {
+      if (v.off_domain) {
+        els.actionResult.innerHTML =
+          "<strong>Not a banking request</strong>, not forwarded to the bank";
+      } else if (v.missing_details) {
         const promptText = (typeof v.missing_details === "object" && (v.missing_details.prompt || v.missing_details.message))
           ? (v.missing_details.prompt || v.missing_details.message)
           : "which account to send from, and who/which account to send to?";

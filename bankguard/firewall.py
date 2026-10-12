@@ -116,6 +116,7 @@ class Firewall:
                     "category": result.get("category", "none"),
                     "reasoning": result.get("reasoning", ""),
                     "risk_score": round(float(result["risk_score"]), 3),
+                    "prompt_version": result.get("prompt_version"),
                 }
 
                 # Defense-in-depth guardrail: do not allow judge to flag a request as
@@ -261,6 +262,13 @@ class Firewall:
         if not blocked:
             code = "ok"
 
+        # A safe verdict with no recognised banking intent at all (and the judge's intent
+        # fallback didn't find one either) isn't a banking request — nothing should be
+        # "executed" for it. Real recognised intents (including judge-inferred ones, which
+        # replace "unknown" — see above) are unaffected.
+        off_domain = (not blocked) and intent is not None and intent.get("name") == "unknown"
+        next_step = "not_a_banking_request" if off_domain else None
+
         out = {
             "request_id": uuid.uuid4().hex[:12],
             "status": "blocked" if blocked else "safe",
@@ -278,6 +286,8 @@ class Firewall:
             "layers": layers or {"rules": {"risk_score": risk, "blocked": blocked},
                                   "llm_judge": {"used": False}, "pipeline": "rules_only"},
             "missing_details": missing_details,
+            "off_domain": off_domain,
+            "next_step": next_step,
         }
         if cfg.verbose:
             out["threats"] = [{"rule": h.id, "category": h.category, "weight": h.weight,

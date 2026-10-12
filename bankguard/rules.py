@@ -26,6 +26,28 @@ def _r(id: str, category: str, weight: float, description: str, *patterns: str) 
 _TARGETS = (r"(?:instructions?|rules?|prompts?|guidelines?|polic(?:y|ies)|restrictions?|directives?|"
             r"guardrails?|safeguards?|programming|training|constraints?)")
 
+# Emotional/urgent pretext (bereavement or an emergency involving a family member/friend) used
+# to pressure the assistant into handing over access, credentials, or money. Includes a few
+# cheap Hinglish/Hindi variants (transliterated, not full coverage).
+_BEREAVEMENT_PRETEXT = (
+    r"(?:grand(?:mother|father|ma|pa)|mother|mom|father|dad|wife|husband|relative|friend)\b[^\n]{0,40}\b"
+    r"(?:passed away|died|dead|deceased|in (?:the )?hospital|emergency)|"
+    r"(?:papa|mummy|dadi|nani|dada|nana|maa|baba|dost)\b[^\n]{0,30}\b"
+    r"(?:guzar gaye|gujar gaye|mar gaye|mar gaya|chal basey|chal base|expire ho gaye|aspatal mein|hospital mein)"
+)
+# Asks the assistant to hand over access, a key, a password, a PIN, an OTP, credentials, or to
+# unlock a device.
+_ACCESS_REQUEST = (
+    r"(?:give me|send me|share|provide|tell me|need|want|get (?:me )?(?:into|in))\b[^\n]{0,30}\b"
+    r"(?:access|keys?|passwords?|pins?|otps?|credentials?|licen[cs]e\s*key|product\s*key|"
+    r"activation\s*key|windows\s*key|unlock)\b|"
+    # Hinglish "give" verbs, reversed order ("uska OTP de do" = "give her OTP").
+    r"\b(?:access|keys?|passwords?|pins?|otps?|credentials?)\b[^\n]{0,15}\b"
+    r"(?:de do|dedo|do na|bhejo|bhej do)\b"
+)
+# Asks to send/transfer/wire/move money or cash.
+_FUND_REQUEST = r"\b(?:send|transfer|wire|move)\b[^\n]{0,20}\b(?:money|funds?|cash)\b"
+
 RULES: list[Rule] = [
     # ---- instruction override ------------------------------------------------------------
     _r("io_ignore_instructions", "instruction_override", 0.92,
@@ -116,6 +138,19 @@ RULES: list[Rule] = [
        r"\b(?:secret(?:ly)?|between us|no one (?:needs|should) (?:to )?know)\b"),
     _r("sx_urgency", "social_engineering", 0.2, "Urgency pressure",
        r"\b(?:urgent(?:ly)?|right now|asap|emergency)\b"),
+    _r("sx_bereavement_access", "social_engineering", 0.65,
+       "Emotional/bereavement pretext combined with a request for access, keys, or credentials",
+       r"(?:" + _BEREAVEMENT_PRETEXT + r")[\s\S]{0,150}(?:" + _ACCESS_REQUEST + r")",
+       r"(?:" + _ACCESS_REQUEST + r")[\s\S]{0,150}(?:" + _BEREAVEMENT_PRETEXT + r")"),
+    _r("sx_bereavement_funds", "social_engineering", 0.85,
+       "Emotional/bereavement pretext combined with a request to move money or access an account",
+       r"(?=[\s\S]*?(?:" + _BEREAVEMENT_PRETEXT + r"))"
+       r"(?=[\s\S]*?(?:" + _ACCESS_REQUEST + r"|" + _FUND_REQUEST + r"))"
+       r"(?=[\s\S]*?\b(?:money|funds?|account|transfer|balance|wire|otp|pin)\b)[\s\S]"),
+    _r("sx_key_request", "social_engineering", 0.5,
+       "Asks for a licence/product/activation key, or a key/password 'for' something",
+       r"\b(?:licen[cs]e|product|activation|windows)\s*key\b",
+       r"\bgive\s+me\s+(?:a|the|your|an)?\s*(?:key|password)\b[^\n]{0,20}\bfor\b"),
 
     # ---- data exfiltration ---------------------------------------------------------------
     _r("de_bulk", "data_exfiltration", 0.85, "Asks for data about all/other customers",
