@@ -13,7 +13,10 @@ _INTENTS = [
         r"electricity|water|gas|utility|recharge|fee|fees|tuition)\b|\b(?:bill\s*pay(?:ment)?|recharge)\b|"
         # Hindi, Kannada, Tamil, Telugu, Hinglish, Spanish — common bill-payment phrasings.
         r"बिल\s*(?:का\s*)?(?:भुगतान|भरें|भरना|जमा)|ಬಿಲ್\s*(?:ಪಾವತಿ|ಕಟ್ಟಿ)|பில்(?:\s*)?(?:செலுத்த|கட்ட)|"
-        r"బిల్లు\s*(?:చెల్లించ|కట్ట)|\bbill\s*(?:bharo|bharna|pay\s*karo)\b|\b(?:pagar|pago\s+de)\s+(?:la\s+)?factura\b",
+        r"బిల్లు\s*(?:చెల్లించ|కట్ట)|\bbill\s*(?:bharo|bharna|pay\s*karo)\b|\b(?:pagar|pago\s+de)\s+(?:la\s+)?factura\b|"
+        # Kannada, Tamil, Telugu — romanized (transliterated) bill-payment phrasings.
+        r"\bbill\s*(?:katti|kattu|kattbeku|pay\s*madi)\b|\bbill\s*(?:seluthu|seluthanum|kattanum)\b|"
+        r"\bbill(?:u)?\s*(?:chellinchandi|kattandi)\b",
         _FLAGS)),
     ("transfer_funds", True, re.compile(
         r"\b(?:transfer|wire|remit|neft|rtgs|imps|upi)\b|"
@@ -24,7 +27,16 @@ _INTENTS = [
         r"பணம்\s*அனுப்ப|பரிமாற்ற|"
         r"డబ్బు\s*పంప|బదిలీ\s*చేయ|"
         r"\bpaise\s*(?:bhejo|bhejna|transfer)\b|\bpaisa\s*transfer\b|\btransfer\s*karo\b|"
-        r"\btransferir\s+dinero\b|\benviar\s+dinero\b|\bhacer\s+una\s+transferencia\b",
+        r"\btransferir\s+dinero\b|\benviar\s+dinero\b|\bhacer\s+una\s+transferencia\b|"
+        # Hinglish/Hindi spelling variants: send-verb + money-word, either order, plus "<number> ko <verb>".
+        r"\b(?:bejo|bhejo|bhej|bheje|bhejna)\b(?:\s+\w+){0,3}?\s*\b(?:paisa|paise|paiso|rupaye?|rupay)\b|"
+        r"\b(?:paisa|paise|paiso|rupaye?|rupay)\b(?:\s+\w+){0,3}?\s*\b(?:bejo|bhejo|bhej|bheje|bhejna)\b|"
+        r"\d+\s*ko\s*(?:bejo|bhejo|bhej|bheje|bhejna)\b|"
+        r"\b(?:bejo|bhejo|bhej|bheje|bhejna)\b(?:\s+\w+){0,5}?\s*\bko\b|"
+        # Kannada, Tamil, Telugu — romanized (transliterated) "send money" phrasings.
+        r"\bhana\s*kalisi\b|\bkalisi\b(?:\s+\w+){0,2}?\s*\bhana\b|"
+        r"\bpanam\s*anuppu\b|\banuppu\b(?:\s+\w+){0,2}?\s*\bpanam\b|"
+        r"\bdabbu\s*pampandi\b|\bpampandi\b(?:\s+\w+){0,2}?\s*\bdabbu\b",
         _FLAGS)),
     ("update_account_details", True, re.compile(
         r"\b(?:change|update|edit|modify|add|remove|set|reset)\b[^.\n]{0,25}\b(?:address|phone|mobile|email|beneficiary|"
@@ -42,7 +54,11 @@ _INTENTS = [
         r"இருப்பு|பேலன்ஸ்|கணக்கில்\s*எவ்வளவு|"
         r"బ్యాలెన్స్|మిగులు|ఖాతాలో\s*ఎంత|"
         r"\bmera\s*balance\b|\bbalance\s*kitna\s*hai\b|"
-        r"\b(?:cu[aá]l\s+es\s+mi\s+saldo|cu[aá]nto\s+dinero\s+tengo|mi\s+saldo)\b",
+        r"\b(?:cu[aá]l\s+es\s+mi\s+saldo|cu[aá]nto\s+dinero\s+tengo|mi\s+saldo)\b|"
+        # Kannada, Tamil, Telugu — romanized (transliterated) "what's my balance" phrasings.
+        r"\bbalance\s*(?:eshtide|eshtu\s*ide)\b|\bshilku\s*(?:eshtide|eshtu\s*ide)?\b|"
+        r"\birupu\s*evvalavu\b|\bbalance\s*evvalavu\b|"
+        r"\bbalance\s*entha\b|\bmigulu\s*entha\b",
         _FLAGS)),
     ("transaction_history", False, re.compile(
         r"\b(?:transactions?|statements?|history|passbook|mini statement|spent|spending)\b", _FLAGS)),

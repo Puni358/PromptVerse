@@ -301,11 +301,13 @@
     els.actionResult.className = "action-result " + (safe ? "safe" : "blocked");
     if (safe) {
       const intentName = (v.intent && v.intent.name) || "unknown";
-      const otp = v.intent && v.intent.high_risk
-        ? '<div class="otp-badge">OTP required</div>'
-        : "";
-      els.actionResult.innerHTML =
-        `<strong>Action executed:</strong> ${escapeHtml(intentName)}${otp}`;
+      if (v.intent && v.intent.high_risk) {
+        els.actionResult.innerHTML =
+          `<strong>Step-up verification (OTP) required</strong> for ${escapeHtml(intentName)}`;
+      } else {
+        els.actionResult.innerHTML =
+          `<strong>Action executed:</strong> ${escapeHtml(intentName)}`;
+      }
     } else {
       els.actionResult.textContent = "Action stopped: nothing reached the bank";
     }

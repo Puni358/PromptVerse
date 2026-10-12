@@ -1,7 +1,7 @@
 """Google Gemini judge provider — plain REST via urllib, no google/anthropic SDK dependency
-(bankguard stays stdlib-only). The system prompt lives in prompts/judge_v1.md (see
-prompts/README.md). Selected by bankguard.judge.build_judge() when LLM_PROVIDER=gemini
-(the default) and GEMINI_API_KEY is set.
+(bankguard stays stdlib-only). The system prompt lives in prompts/judge_v2.md (see
+prompts/README.md; judge_v1.md is kept for history, not deleted). Selected by
+bankguard.judge.build_judge() when LLM_PROVIDER=gemini (the default) and GEMINI_API_KEY is set.
 """
 from __future__ import annotations
 
@@ -13,7 +13,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "judge_v1.md"
+PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "judge_v2.md"
+
+# Mirrors bankguard/intent.py's intent names (plus "other"). Kept as a local, explicit list
+# rather than importing bankguard.intent, so the judge's output contract doesn't silently
+# change if intent.py's internal intent set changes shape.
+_INTENTS = ["transfer_funds", "pay_bill", "update_account_details", "check_balance",
+            "transaction_history", "card_services", "loan_enquiry", "other"]
+_MONEY_MOVING_INTENTS = {"transfer_funds", "pay_bill", "update_account_details"}
 
 _RESPONSE_SCHEMA = {
     "type": "OBJECT",
@@ -22,13 +29,17 @@ _RESPONSE_SCHEMA = {
         "confidence": {"type": "NUMBER"},
         "category": {"type": "STRING"},
         "reason": {"type": "STRING"},
+        "intent": {"type": "STRING", "enum": _INTENTS},
     },
-    "required": ["attack", "confidence", "category", "reason"],
+    "required": ["attack", "confidence", "category", "reason", "intent"],
 }
 
 
 class GeminiJudge:
-    """.assess(message) -> {"attack", "confidence", "category", "reasoning", "risk_score"}.
+    """.assess(message) -> {"attack", "confidence", "category", "reasoning", "risk_score",
+    "intent"}. "intent" is one of bankguard/intent.py's intent names, or "other" — used by
+    Firewall._check() only as a fallback when the rules' own intent classifier found nothing
+    (see bankguard/firewall.py).
 
     `timeout` is the TOTAL wall-clock budget across all attempts (default 7s), not per-call —
     this matters because api/check.py runs as a Vercel function with a 10s limit, so the whole
@@ -116,10 +127,14 @@ class GeminiJudge:
         data = json.loads(text)
         attack = bool(data.get("attack"))
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
+        intent = data.get("intent")
+        if intent not in _INTENTS:  # guard against a non-enum value slipping through
+            intent = "other"
         return {
             "attack": attack,
             "confidence": confidence,
             "category": str(data.get("category", "none"))[:40],
             "reasoning": str(data.get("reason", ""))[:200],
             "risk_score": confidence if attack else 0.0,
+            "intent": intent,
         }

@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ["LLM_PROVIDER"] = "none"
 
 from bankguard import BlockedRequest, Config, Firewall, guarded, handle_request  # noqa: E402
+from bankguard.intent import classify_intent  # noqa: E402
 
 FW = Firewall()
 
@@ -156,6 +157,43 @@ class Intent(unittest.TestCase):
 
     def test_high_risk_has_stricter_threshold(self):
         self.assertLess(FW.check("transfer $5 to bob")["threshold"], FW.check("what's my balance")["threshold"])
+
+    def test_hinglish_hindi_spelling_variants(self):
+        cases = {
+            "500 bejo mere dost ko": "transfer_funds",
+            "bhejo mere dost ko": "transfer_funds",
+            "paisa bhej do": "transfer_funds",
+            "paise bheje mujhe": "transfer_funds",
+            "paiso bhej do": "transfer_funds",
+            "500 ko bhejo": "transfer_funds",
+            "rupaye bhejna hai": "transfer_funds",
+            "rupay bhej do": "transfer_funds",
+        }
+        for msg, want in cases.items():
+            r = classify_intent(msg)
+            self.assertEqual(r["name"], want, msg)
+            self.assertTrue(r["high_risk"], msg)
+
+    def test_kannada_tamil_telugu_romanized_variants(self):
+        cases = {
+            "hana kalisi 500": "transfer_funds",
+            "kalisi hana": "transfer_funds",
+            "panam anuppu 500": "transfer_funds",
+            "anuppu panam": "transfer_funds",
+            "dabbu pampandi 500": "transfer_funds",
+            "pampandi dabbu": "transfer_funds",
+            "bill katti": "pay_bill",
+            "bill pay madi": "pay_bill",
+            "bill seluthanum": "pay_bill",
+            "billu chellinchandi": "pay_bill",
+            "balance eshtide": "check_balance",
+            "shilku eshtide": "check_balance",
+            "irupu evvalavu": "check_balance",
+            "balance entha": "check_balance",
+            "migulu entha": "check_balance",
+        }
+        for msg, want in cases.items():
+            self.assertEqual(classify_intent(msg)["name"], want, msg)
 
 
 class Gateway(unittest.TestCase):
@@ -318,6 +356,43 @@ class HybridJudge(unittest.TestCase):
         fw = Firewall(Config(verbose=False), judge=judge)
         v = fw.check("Pretend to be my advisor, what is my balance?")
         self.assertEqual(v["layers"], {"pipeline": "hybrid"})
+
+    def test_judge_money_moving_intent_fills_unknown_intent_and_raises_scrutiny(self):
+        judge = FakeJudge(result={"attack": False, "confidence": 0.2, "category": "none",
+                                   "reasoning": "looks like a transfer", "risk_score": 0.0,
+                                   "intent": "transfer_funds"})
+        fw = Firewall(judge=judge)
+        v = fw.check("gibberish the rule-based classifier cannot categorize at all")
+        self.assertEqual(v["intent"]["name"], "transfer_funds")
+        self.assertTrue(v["intent"]["high_risk"])
+        self.assertEqual(v["threshold"], 0.40)
+        self.assertEqual(v["layers"]["llm_judge"]["intent_override"], "transfer_funds")
+        self.assertTrue(any("intent inferred by llm_judge" in r for r in v["reasons"]))
+
+    def test_judge_intent_never_overrides_a_rules_detected_intent(self):
+        judge = FakeJudge(result={"attack": False, "confidence": 0.2, "category": "none",
+                                   "reasoning": "ok", "risk_score": 0.0, "intent": "transfer_funds"})
+        fw = Firewall(judge=judge)
+        v = fw.check("what's my balance")  # rules already says check_balance
+        self.assertEqual(v["intent"]["name"], "check_balance")
+        self.assertFalse(v["intent"]["high_risk"])
+
+    def test_judge_non_money_moving_intent_does_not_raise_high_risk(self):
+        judge = FakeJudge(result={"attack": False, "confidence": 0.2, "category": "none",
+                                   "reasoning": "ok", "risk_score": 0.0, "intent": "check_balance"})
+        fw = Firewall(judge=judge)
+        v = fw.check("asdkjalksdj random gibberish text")  # unknown intent, triggers the judge
+        self.assertEqual(v["intent"]["name"], "unknown")
+        self.assertFalse(v["intent"]["high_risk"])
+
+    def test_judge_intent_override_never_lowers_threshold(self):
+        """Source=document already uses a stricter threshold; a judge-inferred intent must not
+        relax it even though the high-risk threshold alone (0.40) is looser than 0.35."""
+        judge = FakeJudge(result={"attack": False, "confidence": 0.2, "category": "none",
+                                   "reasoning": "ok", "risk_score": 0.0, "intent": "transfer_funds"})
+        fw = Firewall(judge=judge)
+        v = fw.check("gibberish the rule-based classifier cannot categorize at all", source="document")
+        self.assertEqual(v["threshold"], 0.35)
 
 
 class ServerStrictMode(unittest.TestCase):

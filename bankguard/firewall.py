@@ -14,6 +14,9 @@ from .rules import RULES, SQUASHED_PHRASES
 
 VERSION = "1.0.0"
 _PLAIN_VARIANTS = {"plain", "leet"}
+# Mirrors bankguard/intent.py's high_risk=True intents. Used only to decide whether a judge-
+# reported intent is allowed to raise scrutiny when the rules' own classifier found nothing.
+_MONEY_MOVING_INTENTS = {"transfer_funds", "pay_bill", "update_account_details"}
 
 
 @dataclass
@@ -116,6 +119,21 @@ class Firewall:
                 }
                 risk = max(risk, result["risk_score"])
                 reasons_extra.append("llm_judge consulted")
+
+                # Intent fallback: only when the rules' own classifier found nothing at all,
+                # and only to RAISE scrutiny — never overrides a rules-detected intent, and
+                # never lowers the threshold below what the rules already decided.
+                judge_intent = result.get("intent")
+                if intent["name"] == "unknown" and judge_intent in _MONEY_MOVING_INTENTS:
+                    intent["name"] = judge_intent
+                    intent["high_risk"] = True
+                    intent["detected"] = [judge_intent]
+                    judge_layer["intent_override"] = judge_intent
+                    reasons_extra.append(f"intent inferred by llm_judge: {judge_intent}")
+                    new_threshold = cfg.high_risk_threshold
+                    if source != "user":
+                        new_threshold = min(new_threshold, cfg.untrusted_threshold)
+                    threshold = min(threshold, new_threshold)  # only ever tighten, never relax
             except Exception as exc:
                 judge_layer = {"used": True, "triggered_by": triggers, "error": type(exc).__name__}
                 if non_latin:
