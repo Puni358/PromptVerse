@@ -245,6 +245,84 @@ class GeminiJudgeClient(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 judge.assess("hello")
 
+    def test_auth_error_not_retried_and_classified_correctly(self):
+        attempts = []
+
+        def fake_urlopen(req, timeout=None):
+            attempts.append(1)
+            err_body = json.dumps({"error": {"code": 401, "message": "API key not valid. Please pass a valid API key.", "status": "UNAUTHENTICATED"}}).encode()
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", hdrs={}, fp=io.BytesIO(err_body))
+
+        judge = GeminiJudge(api_key="fake-key", max_retries=2)
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                judge.assess("hello")
+
+        self.assertEqual(len(attempts), 1)
+        exc = ctx.exception
+        self.assertEqual(exc.status_code, 401)
+        self.assertEqual(exc.error_type, "auth_error")
+        self.assertEqual(exc.gemini_status, "UNAUTHENTICATED")
+        self.assertIn("API key not valid", exc.gemini_message)
+        self.assertFalse(exc.is_transient)
+        self.assertGreaterEqual(exc.latency_ms, 0.0)
+
+    def test_invalid_request_not_retried(self):
+        attempts = []
+
+        def fake_urlopen(req, timeout=None):
+            attempts.append(1)
+            err_body = json.dumps({"error": {"code": 400, "message": "Invalid argument", "status": "INVALID_ARGUMENT"}}).encode()
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", hdrs={}, fp=io.BytesIO(err_body))
+
+        judge = GeminiJudge(api_key="fake-key", max_retries=2)
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                judge.assess("hello")
+
+        self.assertEqual(len(attempts), 1)
+        exc = ctx.exception
+        self.assertEqual(exc.status_code, 400)
+        self.assertEqual(exc.error_type, "invalid_request")
+        self.assertFalse(exc.is_transient)
+
+    def test_quota_exhausted_daily_not_retried(self):
+        attempts = []
+
+        def fake_urlopen(req, timeout=None):
+            attempts.append(1)
+            err_body = json.dumps({"error": {"code": 429, "message": "Resource has been exhausted (e.g. check quota). Daily quota exceeded.", "status": "RESOURCE_EXHAUSTED"}}).encode()
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", hdrs={}, fp=io.BytesIO(err_body))
+
+        judge = GeminiJudge(api_key="fake-key", max_retries=2)
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                judge.assess("hello")
+
+        self.assertEqual(len(attempts), 1)
+        exc = ctx.exception
+        self.assertEqual(exc.status_code, 429)
+        self.assertEqual(exc.error_type, "quota_exhausted")
+        self.assertFalse(exc.is_transient)
+
+    def test_service_error_retried_transient_then_succeeds(self):
+        attempts = []
+
+        def fake_urlopen(req, timeout=None):
+            attempts.append(1)
+            if len(attempts) == 1:
+                err_body = json.dumps({"error": {"code": 503, "message": "Service Unavailable", "status": "UNAVAILABLE"}}).encode()
+                raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", hdrs={}, fp=io.BytesIO(err_body))
+            return _fake_response({"attack": False, "confidence": 0.0, "category": "none", "reason": "fine"})
+
+        judge = GeminiJudge(api_key="fake-key", max_retries=2)
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen), \
+             mock.patch("bankguard.providers.gemini.time.sleep"):
+            result = judge.assess("hello")
+
+        self.assertEqual(len(attempts), 2)
+        self.assertFalse(result["attack"])
+
     def test_missing_api_key_raises_at_construction(self):
         # Other test modules importing app_core/server can populate os.environ from the
         # repo's local .env (load_dotenv never overwrites, but it does set unset vars), so

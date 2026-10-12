@@ -318,9 +318,11 @@
     if (safe) {
       const intentName = (v.intent && v.intent.name) || "unknown";
       if (v.missing_details) {
+        const promptText = (typeof v.missing_details === "object" && (v.missing_details.prompt || v.missing_details.message))
+          ? (v.missing_details.prompt || v.missing_details.message)
+          : "which account to send from, and who/which account to send to?";
         els.actionResult.innerHTML =
-          "<strong>More details needed:</strong> which account to send from, and who/which " +
-          "account to send to?";
+          `<strong>More details needed:</strong> ${escapeHtml(promptText)}`;
       } else if (v.intent && v.intent.high_risk) {
         els.actionResult.innerHTML =
           `<strong>Step-up verification (OTP) required</strong> for ${escapeHtml(intentName)}`;
@@ -329,7 +331,12 @@
           `<strong>Action executed:</strong> ${escapeHtml(intentName)}`;
       }
     } else {
-      els.actionResult.textContent = "Action stopped: nothing reached the bank";
+      if (v.code === "service_unavailable" || (v.layers && v.layers.llm_judge && v.layers.llm_judge.fail_closed)) {
+        els.actionResult.innerHTML =
+          "<strong>Service unavailable:</strong> security judge could not verify high-risk transaction; request stopped for safety.";
+      } else {
+        els.actionResult.textContent = "Action stopped: nothing reached the bank";
+      }
     }
   }
 

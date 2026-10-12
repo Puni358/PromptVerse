@@ -147,9 +147,9 @@ RULES: list[Rule] = [
        r"\b(?:drain|empty|clear out)\b(?:\s+\w+){0,3}?\s+(?:account|balance|funds|savings)\b",
        r"\b(?:all|entire|whole|full)\s+(?:the\s+)?(?:balance|funds|money|savings)\b"),
     _r("ua_not_users_account", "unauthorized_action", 0.6,
-       "Asks to move money from an account that is not the user's own",
-       r"\bfrom\s+(?:your|ur|the\s+(?:bank'?s?|system'?s?|company'?s?|assistant'?s?)(?:\s+(?:system'?s?|reserve|master|internal))?|"
-       r"(?:someone\s+else|another\s+(?:person|user|customer)|their|his|her)'?s?)\s+(?:account|money|funds)\b"),
+       "Asks to move money from an internal bank, system, or assistant account",
+       r"\bfrom\s+(?:your|ur|the\s+(?:bank'?s?|system'?s?|company'?s?|assistant'?s?)(?:\s+(?:system'?s?|reserve|master|internal))?)\s+"
+       r"(?:account|money|funds)\b"),
 
     # ---- indirect injection (content from documents / tools) -----------------------------
     _r("in_note_to_ai", "indirect_injection", 0.45, "Text addressed to the AI model rather than the bank",

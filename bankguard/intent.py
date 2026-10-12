@@ -21,6 +21,7 @@ _INTENTS = [
     ("transfer_funds", True, re.compile(
         r"\b(?:transfer|wire|remit|neft|rtgs|imps|upi)\b|"
         r"\b(?:send|move|pay|give)\b[^.\n]{0,30}(?:\b(?:money|funds|amount|rupees|dollars|euros|inr|usd|rs\.?)\b|[$₹€£]\s?\d)|"
+        r"\b(?:send|move)\b\s+\d+(?:,\d+)*(?:\.\d+)?\b|"
         r"\b(?:send|move|pay|give)\b\s+\d+(?:,\d+)*(?:\.\d+)?\s*(?:to\b|from\b|into\b)|"
         # Hindi, Kannada, Tamil, Telugu, Hinglish, Spanish — common "send/transfer money" phrasings.
         r"पैसे?\s*(?:भेजो|भेजें|भेजना|ट्रांसफर)|रुपये?\s*भेज|ट्रांसफर\s*(?:करो|करें|कीजिए)|"
@@ -36,6 +37,10 @@ _INTENTS = [
         r"\b(?:bejo|bhejo|bhej|bheje|bhejna)\b(?:\s+\w+){0,5}?\s*\bko\b|"
         # Kannada, Tamil, Telugu — romanized (transliterated) "send money" phrasings.
         r"\bhana\s*kalisi\b|\bkalisi\b(?:\s+\w+){0,2}?\s*\bhana\b|"
+        r"\b(?:nange|nanage)\b[^.\n]{0,30}\b(?:kalsu|kalisu|kalsi|kalisi|kallsu|kaluhisu|kalsbeku|kalisbeku)\b|"
+        r"\b(?:kalsu|kalisu|kalsi|kalisi|kallsu|kaluhisu|kalsbeku|kalisbeku)\b[^.\n]{0,30}\b(?:nange|nanage)\b|"
+        r"\b(?:hana|duddu|dudd|rupayi|rupees|kaasu|\d+)\b[^.\n]{0,30}\b(?:kalsu|kalisu|kalsi|kalisi|kallsu|kaluhisu|kalsbeku|kalisbeku)\b|"
+        r"\b(?:kalsu|kalisu|kalsi|kalisi|kallsu|kaluhisu|kalsbeku|kalisbeku)\b(?:\s+\w+){0,2}?\s*(?:\b(?:hana|duddu|dudd|rupayi|rupees|kaasu)\b|\d+)|"
         r"\bpanam\s*anuppu\b|\banuppu\b(?:\s+\w+){0,2}?\s*\bpanam\b|"
         r"\bdabbu\s*pampandi\b|\bpampandi\b(?:\s+\w+){0,2}?\s*\bdabbu\b",
         _FLAGS)),
@@ -100,25 +105,83 @@ def extract_entities(text: str) -> dict:
     return {"amounts": amounts, "account_refs_last4": refs}
 
 
-_SOURCE_PHRASE_RE = re.compile(r"\bfrom\b", re.I)
+_SOURCE_PHRASE_RE = re.compile(
+    r"\bfrom\b|\binda\b|-inda\b|\bse\b|-se\b|\birunthu\b|\bnundi\b", re.I
+)
 # "to" followed by something other than the infinitive use ("want to transfer", "need to pay")
 # signals an actual destination clause ("to my savings account", "to bob"); an account-number-
-# shaped token on its own also counts even without a "to".
+# shaped token or recipient pronouns ("nange", "to me") also count even without a "to".
 _TARGET_PHRASE_RE = re.compile(
-    r"\bto\s+(?!transfer\b|pay\b|send\b|move\b|wire\b|give\b|check\b|do\b|make\b)\S|\b\d{6,18}\b", re.I)
+    r"\b(?:to|into|for)\s+(?!transfer\b|pay\b|send\b|move\b|wire\b|give\b|check\b|do\b|make\b)\S|"
+    r"\b\d{6,18}\b|\bto\s+me\b|\b(?:nange|nanage)\b|\b(?:mujhe|mere\s+ko)\b|\benakku\b|\bnaaku\b|"
+    r"\bge\b|-ge\b|\bkke\b|-kke\b|\bko\b|-ko\b",
+    re.I
+)
+_THIRD_PARTY_SOURCE_RE = re.compile(
+    r"\bfrom\s+(?:my\s+)?(?:brother'?s?|sister'?s?|father'?s?|mother'?s?|friend'?s?|wife'?s?|husband'?s?|"
+    r"someone\s+else'?s?|another\s+(?:person|user|customer)'?s?|their|his|her)\s+account\b|"
+    r"\bfrom\s+another\s+account\b",
+    re.I
+)
 
 
-def missing_transfer_details(intent_name: str, text: str) -> bool:
-    """True when a transfer_funds message lacks either a source account ("from ...")
-    or a destination ("to ...", an account number), or when a pay_bill message lacks
-    a source account ("from ...").
-    Always False for any other intent; this never affects risk scoring,
-    it only drives the UI's "more details needed" prompt (see Firewall._check())."""
+def missing_transfer_details(intent_name: str, text: str) -> dict | None:
+    """Returns a structured dictionary when a transfer_funds/pay_bill message lacks
+    essential details (source account, recipient, or third-party authorization), or
+    None when all details are present.
+    Always None for other intents; this never affects risk scoring, it drives the UI's
+    'more details needed' clarification response (see Firewall._check())."""
     if intent_name == "transfer_funds":
-        return not _SOURCE_PHRASE_RE.search(text) or not _TARGET_PHRASE_RE.search(text)
+        has_source = bool(_SOURCE_PHRASE_RE.search(text))
+        has_recipient = bool(_TARGET_PHRASE_RE.search(text))
+        is_third_party = bool(_THIRD_PARTY_SOURCE_RE.search(text))
+
+        needed = []
+        if not has_source:
+            needed.append("source_account")
+        if not has_recipient:
+            needed.append("recipient")
+        if is_third_party:
+            needed.append("third_party_authorization")
+
+        if not needed:
+            return None
+
+        if not has_source and not has_recipient:
+            prompt = "Please specify which account to send from, and who or which account to send to."
+        elif not has_source:
+            prompt = "Please specify which account to send from."
+        elif not has_recipient and is_third_party:
+            prompt = "Please specify who or which account to send to. Note that transferring from a third-party account requires authorization."
+        elif not has_recipient:
+            prompt = "Please specify who or which account to send to."
+        else:
+            prompt = "Third-party account authorization required to transfer from another person's account."
+
+        return {
+            "needed": needed,
+            "missing_source": not has_source,
+            "missing_recipient": not has_recipient,
+            "third_party_source": is_third_party,
+            "prompt": prompt,
+            "message": prompt,
+        }
+
     if intent_name == "pay_bill":
-        return not _SOURCE_PHRASE_RE.search(text)
-    return False
+        has_source = bool(_SOURCE_PHRASE_RE.search(text))
+        if not has_source:
+            prompt = "Please specify which account to pay from."
+            return {
+                "needed": ["source_account"],
+                "missing_source": True,
+                "missing_recipient": False,
+                "third_party_source": False,
+                "prompt": prompt,
+                "message": prompt,
+            }
+        return None
+
+    return None
 
 
 def classify_intent(plain_text: str) -> dict:

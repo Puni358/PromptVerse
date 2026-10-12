@@ -66,6 +66,8 @@ def run_check(body: dict, ip: str) -> tuple[int, dict]:
     strict = bool(body.get("strict", False))
     fw = FW_STRICT if strict else FW
     verdict = fw.check(msg, source=source)
+    if verdict.get("code") == "service_unavailable":
+        return 503, verdict
     return (200 if verdict["status"] == "safe" else 403), verdict
 
 

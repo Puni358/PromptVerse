@@ -117,7 +117,18 @@ class Firewall:
                     "reasoning": result.get("reasoning", ""),
                     "risk_score": round(float(result["risk_score"]), 3),
                 }
-                risk = max(risk, result["risk_score"])
+
+                # Defense-in-depth guardrail: do not allow judge to flag a request as
+                # unauthorized_funds_movement if rules engine found no unauthorized system/bank
+                # account and the message is merely missing details or mentioning a third-party account.
+                if (result["attack"] and result.get("category") == "unauthorized_funds_movement"
+                        and not any(h.id == "ua_not_users_account" for h in hits)):
+                    judge_layer["attack"] = False
+                    judge_layer["risk_score"] = 0.0
+                    judge_layer["note"] = "third_party_or_incomplete_not_classified_as_attack"
+                else:
+                    risk = max(risk, result["risk_score"])
+
                 reasons_extra.append("llm_judge consulted")
 
                 # Intent fallback: only when the rules' own classifier found nothing at all,
@@ -135,13 +146,30 @@ class Firewall:
                         new_threshold = min(new_threshold, cfg.untrusted_threshold)
                     threshold = min(threshold, new_threshold)  # only ever tighten, never relax
             except Exception as exc:
-                judge_layer = {"used": True, "triggered_by": triggers, "error": type(exc).__name__}
+                error_type = getattr(exc, "error_type", type(exc).__name__)
+                status_code = getattr(exc, "status_code", getattr(exc, "code", None))
+                gemini_msg = getattr(exc, "gemini_message", str(exc))
+                latency_ms = getattr(exc, "latency_ms", None)
+
+                judge_layer = {
+                    "used": True,
+                    "triggered_by": triggers,
+                    "error": type(exc).__name__,
+                    "error_type": error_type,
+                }
+                if status_code is not None:
+                    judge_layer["status_code"] = status_code
+                if gemini_msg:
+                    judge_layer["error_message"] = gemini_msg
+                if latency_ms is not None:
+                    judge_layer["latency_ms"] = round(latency_ms, 1)
+
                 if non_latin:
                     reasons_extra.append(
                         "llm_judge unavailable for a non-English message; rules-only verdict "
                         "may be less reliable for this text")
                 else:
-                    reasons_extra.append("llm_judge unavailable")
+                    reasons_extra.append(f"llm_judge unavailable ({error_type})")
                 if intent["high_risk"]:  # fail closed on money-moving actions
                     risk = max(risk, threshold)
                     judge_layer["fail_closed"] = True
@@ -160,7 +188,7 @@ class Firewall:
 
         # Informational only — never affects risk/threshold/blocked. Computed after any
         # judge-intent fallback above, so it reflects whichever intent the verdict settled on.
-        missing_details = (not blocked) and missing_transfer_details(intent["name"], message)
+        missing_details = missing_transfer_details(intent["name"], message) if not blocked else None
 
         return self._verdict(blocked, risk, threshold, hits, intent, reasons_extra, message, source,
                              code, layers, missing_details)
@@ -209,7 +237,7 @@ class Firewall:
                              message if isinstance(message, str) else "", source, code, layers)
 
     def _verdict(self, blocked, risk, threshold, hits, intent, reasons, message, source, code=None,
-                 layers=None, missing_details=False) -> dict:
+                 layers=None, missing_details=None) -> dict:
         cfg = self.cfg
         risk = round(min(max(risk, 0.0), 1.0), 3)
         seen, reason_list = set(), []
@@ -224,8 +252,12 @@ class Firewall:
             reason_list.insert(0, "Weak signals only, below block threshold")
 
         if code is None and blocked:
-            top = hits[0].category if hits else "policy"
-            code = f"blocked_{top}"
+            if layers and layers.get("llm_judge", {}).get("fail_closed") and not hits:
+                code = "service_unavailable"
+                reason_list.insert(0, "Security verification service temporarily unavailable; request stopped for safety")
+            else:
+                top = hits[0].category if hits else "policy"
+                code = f"blocked_{top}"
         if not blocked:
             code = "ok"
 
@@ -245,7 +277,7 @@ class Firewall:
             "firewall_version": VERSION,
             "layers": layers or {"rules": {"risk_score": risk, "blocked": blocked},
                                   "llm_judge": {"used": False}, "pipeline": "rules_only"},
-            "missing_details": bool(missing_details),
+            "missing_details": missing_details,
         }
         if cfg.verbose:
             out["threats"] = [{"rule": h.id, "category": h.category, "weight": h.weight,
