@@ -25,7 +25,11 @@ def build_judge():
     if provider in ("none", ""):
         return None
     if provider == "gemini":
-        if not os.environ.get("GEMINI_API_KEY"):
+        has_key = bool(
+            os.environ.get("GEMINI_API_KEY")
+            or any(k.startswith("GEMINI_API_KEY_") and v.strip() for k, v in os.environ.items())
+        )
+        if not has_key:
             return None
         from .providers.gemini import GeminiJudge
         return GeminiJudge()

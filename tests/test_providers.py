@@ -74,6 +74,13 @@ class ProviderSelection(unittest.TestCase):
         judge = build_judge()
         self.assertIsInstance(judge, GeminiJudge)
 
+    def test_gemini_with_numbered_key_builds_a_judge(self):
+        os.environ["LLM_PROVIDER"] = "gemini"
+        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ["GEMINI_API_KEY_1"] = "fake-key-1"
+        judge = build_judge()
+        self.assertIsInstance(judge, GeminiJudge)
+
     def test_unknown_provider_raises(self):
         os.environ["LLM_PROVIDER"] = "not_a_real_provider"
         with self.assertRaises(ValueError):
@@ -323,17 +330,149 @@ class GeminiJudgeClient(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertFalse(result["attack"])
 
+    def test_env_key_rotation_loading_order(self):
+        saved_env = dict(os.environ)
+        try:
+            for k in list(os.environ.keys()):
+                if k == "GEMINI_API_KEY" or k.startswith("GEMINI_API_KEY_"):
+                    os.environ.pop(k, None)
+            os.environ["GEMINI_API_KEY_3"] = "key-3"
+            os.environ["GEMINI_API_KEY_1"] = "key-1"
+            os.environ["GEMINI_API_KEY_2"] = "key-2"
+            os.environ["GEMINI_API_KEY"] = "key-fallback"
+
+            judge = GeminiJudge()
+            self.assertEqual(judge.api_keys, ["key-1", "key-2", "key-3", "key-fallback"])
+            self.assertEqual(judge.api_key, "key-1")
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_env)
+
+    def test_key_rotation_on_429_fails_over_to_next_key_and_succeeds(self):
+        attempts = []
+        keys_used = []
+
+        def fake_urlopen(req, timeout=None):
+            headers = dict(req.header_items())
+            key = headers.get("x-goog-api-key") or headers.get("X-goog-api-key")
+            keys_used.append(key)
+            attempts.append(1)
+            if len(attempts) == 1:
+                # Key 1 returns 429
+                raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", hdrs={}, fp=None)
+            # Key 2 succeeds
+            return _fake_response({"attack": False, "confidence": 0.0, "category": "none", "reason": "fine"})
+
+        judge = GeminiJudge(api_keys=["key-1", "key-2", "key-3"])
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            result = judge.assess("hello")
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(keys_used, ["key-1", "key-2"])
+        self.assertFalse(result["attack"])
+        self.assertEqual(judge._key_index, 1)
+
+    def test_key_rotation_on_429_skips_attempted_keys_and_stops_when_all_exhausted(self):
+        attempts = []
+        keys_used = []
+
+        def fake_urlopen(req, timeout=None):
+            headers = dict(req.header_items())
+            key = headers.get("x-goog-api-key") or headers.get("X-goog-api-key")
+            keys_used.append(key)
+            attempts.append(1)
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", hdrs={}, fp=None)
+
+        judge = GeminiJudge(api_keys=["key-1", "key-2", "key-3"])
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                judge.assess("hello")
+
+        # Each key tried once, no infinite loops
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(keys_used, ["key-1", "key-2", "key-3"])
+        self.assertEqual(ctx.exception.status_code, 429)
+
+    def test_quota_exhausted_fails_over_to_next_key_and_succeeds(self):
+        attempts = []
+        keys_used = []
+
+        def fake_urlopen(req, timeout=None):
+            headers = dict(req.header_items())
+            key = headers.get("x-goog-api-key") or headers.get("X-goog-api-key")
+            keys_used.append(key)
+            attempts.append(1)
+            if len(attempts) == 1:
+                # Key 1 returns daily quota exhausted
+                err_body = json.dumps({"error": {"code": 429, "message": "Resource exhausted. Daily quota exceeded.", "status": "RESOURCE_EXHAUSTED"}}).encode()
+                raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", hdrs={}, fp=io.BytesIO(err_body))
+            # Key 2 succeeds
+            return _fake_response({"attack": False, "confidence": 0.0, "category": "none", "reason": "fine"})
+
+        judge = GeminiJudge(api_keys=["key-1", "key-2", "key-3"])
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            result = judge.assess("hello")
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(keys_used, ["key-1", "key-2"])
+        self.assertFalse(result["attack"])
+        self.assertEqual(judge._key_index, 1)
+
+    def test_quota_exhausted_stops_when_all_keys_exhausted(self):
+        attempts = []
+        keys_used = []
+
+        def fake_urlopen(req, timeout=None):
+            headers = dict(req.header_items())
+            key = headers.get("x-goog-api-key") or headers.get("X-goog-api-key")
+            keys_used.append(key)
+            attempts.append(1)
+            err_body = json.dumps({"error": {"code": 429, "message": "Resource exhausted. Daily quota exceeded.", "status": "RESOURCE_EXHAUSTED"}}).encode()
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", hdrs={}, fp=io.BytesIO(err_body))
+
+        judge = GeminiJudge(api_keys=["key-1", "key-2"])
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                judge.assess("hello")
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(keys_used, ["key-1", "key-2"])
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertEqual(ctx.exception.error_type, "quota_exhausted")
+
+    def test_auth_error_does_not_rotate_keys(self):
+        attempts = []
+        keys_used = []
+
+        def fake_urlopen(req, timeout=None):
+            headers = dict(req.header_items())
+            key = headers.get("x-goog-api-key") or headers.get("X-goog-api-key")
+            keys_used.append(key)
+            attempts.append(1)
+            err_body = json.dumps({"error": {"code": 401, "message": "API key not valid", "status": "UNAUTHENTICATED"}}).encode()
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", hdrs={}, fp=io.BytesIO(err_body))
+
+        judge = GeminiJudge(api_keys=["key-1", "key-2"])
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                judge.assess("hello")
+
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(keys_used, ["key-1"])
+        self.assertEqual(ctx.exception.status_code, 401)
+
     def test_missing_api_key_raises_at_construction(self):
         # Other test modules importing app_core/server can populate os.environ from the
         # repo's local .env (load_dotenv never overwrites, but it does set unset vars), so
         # isolate this test from whatever the rest of the suite already did.
-        saved = os.environ.pop("GEMINI_API_KEY", None)
+        saved = {k: v for k, v in os.environ.items() if k == "GEMINI_API_KEY" or k.startswith("GEMINI_API_KEY_")}
+        for k in saved:
+            os.environ.pop(k, None)
         try:
             with self.assertRaises(RuntimeError):
                 GeminiJudge(api_key=None)
         finally:
-            if saved is not None:
-                os.environ["GEMINI_API_KEY"] = saved
+            os.environ.update(saved)
 
 
 if __name__ == "__main__":
