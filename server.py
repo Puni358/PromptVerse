@@ -8,11 +8,31 @@
 import json
 import mimetypes
 import os
+import time
+from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from bankguard import Config, Firewall
 
 VERBOSE = os.environ.get("BANKGUARD_VERBOSE", "1") == "1"
+RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "30"))
+RATE_WINDOW_SECONDS = 60.0
+
+# Per-IP fixed window of request timestamps for /check. The server runs single-threaded
+# (plain HTTPServer), so no lock is needed around this shared state.
+_request_log: dict[str, deque] = defaultdict(deque)
+
+
+def _rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    log = _request_log[ip]
+    cutoff = now - RATE_WINDOW_SECONDS
+    while log and log[0] < cutoff:
+        log.popleft()
+    if len(log) >= RATE_LIMIT_PER_MIN:
+        return True
+    log.append(now)
+    return False
 
 
 def _build_judge():
@@ -82,6 +102,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path != "/check":
             return self._send(404, {"error": "not_found"})
+        if _rate_limited(self.client_address[0]):
+            return self._send(429, {"error": "rate_limited",
+                                    "message": f"Max {RATE_LIMIT_PER_MIN} requests/minute per client"})
         try:
             n = int(self.headers.get("Content-Length", 0))
             if n > 20_000:

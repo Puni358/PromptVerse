@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: bankguard-firewall
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: BANKGUARD_VERBOSE
+        value: "1"
+      - key: RATE_LIMIT_PER_MIN
+        value: "30"
+      - key: ANTHROPIC_API_KEY
+        sync: false   # set manually in the Render dashboard; never committed

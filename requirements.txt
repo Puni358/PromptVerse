@@ -1,0 +1,3 @@
+# Optional: only imported by bankguard/llm_judge.py when ANTHROPIC_API_KEY is set.
+# The firewall core (bankguard/*.py minus llm_judge.py) and server.py are stdlib-only.
+anthropic>=0.40.0

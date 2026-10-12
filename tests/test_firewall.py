@@ -317,6 +317,19 @@ class ServerStrictMode(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "safe")
 
+    def test_rate_limit_returns_429_after_threshold(self):
+        import server as server_module
+        server_module._request_log.clear()
+        original_limit = server_module.RATE_LIMIT_PER_MIN
+        server_module.RATE_LIMIT_PER_MIN = 3
+        try:
+            statuses = [self._post({"message": "what's my balance"})[0] for _ in range(5)]
+        finally:
+            server_module.RATE_LIMIT_PER_MIN = original_limit
+            server_module._request_log.clear()
+        self.assertEqual(statuses[:3], [200, 200, 200])
+        self.assertEqual(statuses[3:], [429, 429])
+
     def test_cors_headers_and_options(self):
         conn = self.http_client.HTTPConnection("127.0.0.1", self.port)
         conn.request("OPTIONS", "/check")
