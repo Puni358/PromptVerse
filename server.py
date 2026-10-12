@@ -13,8 +13,25 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from bankguard import Config, Firewall
 
 VERBOSE = os.environ.get("BANKGUARD_VERBOSE", "1") == "1"
-FW = Firewall(Config(verbose=VERBOSE))
-FW_STRICT = Firewall(Config(verbose=VERBOSE, strict_intent=True))
+
+
+def _build_judge():
+    """Hybrid (rules + LLM) when ANTHROPIC_API_KEY is set and the anthropic SDK is installed;
+    otherwise rules-only, and /check says so via verdict["layers"]["pipeline"]."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    try:
+        from bankguard.llm_judge import ClaudeJudge
+        return ClaudeJudge()
+    except Exception as exc:  # missing `anthropic` package, bad key format, etc.
+        print(f"bankguard: ANTHROPIC_API_KEY set but judge unavailable ({exc!r}); running rules-only")
+        return None
+
+
+JUDGE = _build_judge()
+PIPELINE_MODE = "hybrid" if JUDGE is not None else "rules_only"
+FW = Firewall(Config(verbose=VERBOSE), judge=JUDGE)
+FW_STRICT = Firewall(Config(verbose=VERBOSE, strict_intent=True), judge=JUDGE)
 
 WEB_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
@@ -55,7 +72,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            return self._send(200, {"status": "ok"})
+            return self._send(200, {"status": "ok", "pipeline": PIPELINE_MODE})
         if self.path == "/" or self.path == "":
             return self._send_file("index.html")
         if self.path.startswith("/check") or self.path.startswith("/health"):
@@ -86,5 +103,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
-    print(f"bankguard listening on :{port}")
+    print(f"bankguard listening on :{port} (pipeline={PIPELINE_MODE})")
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()

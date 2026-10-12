@@ -75,17 +75,34 @@ class Firewall:
         if source != "user":
             threshold = min(threshold, cfg.untrusted_threshold)
 
-        risk = self._score(hits)
+        rules_risk = self._score(hits)
+        risk = rules_risk
 
         reasons_extra = []
-        if self.judge is not None and cfg.judge_band_low <= risk < threshold:
+        in_grey_zone = cfg.judge_band_low <= rules_risk < threshold
+        should_consult = self.judge is not None and (intent["high_risk"] or in_grey_zone)
+
+        judge_layer: dict = {"used": False, "reason": "no_judge_configured" if self.judge is None
+                              else "not_high_risk_and_outside_grey_zone"}
+        if should_consult:
             try:
-                risk = max(risk, float(self.judge.assess(message)))
+                result = self.judge.assess(message)
+                judge_layer = {
+                    "used": True,
+                    "attack": result["attack"],
+                    "confidence": round(float(result["confidence"]), 3),
+                    "category": result.get("category", "none"),
+                    "reasoning": result.get("reasoning", ""),
+                    "risk_score": round(float(result["risk_score"]), 3),
+                }
+                risk = max(risk, result["risk_score"])
                 reasons_extra.append("llm_judge consulted")
-            except Exception:
+            except Exception as exc:
+                judge_layer = {"used": True, "error": type(exc).__name__}
                 reasons_extra.append("llm_judge unavailable")
                 if intent["high_risk"]:  # fail closed on money-moving actions
                     risk = max(risk, threshold)
+                    judge_layer["fail_closed"] = True
 
         blocked = risk >= threshold
         code = None
@@ -93,7 +110,14 @@ class Firewall:
             blocked, code = True, "no_recognized_banking_intent"
             reasons_extra.append("Not a recognised banking request (strict mode)")
 
-        return self._verdict(blocked, risk, threshold, hits, intent, reasons_extra, message, source, code)
+        layers = {
+            "rules": {"risk_score": round(rules_risk, 3), "blocked": rules_risk >= threshold},
+            "llm_judge": judge_layer,
+            "pipeline": "hybrid" if self.judge is not None else "rules_only",
+        }
+
+        return self._verdict(blocked, risk, threshold, hits, intent, reasons_extra, message, source,
+                             code, layers)
 
     def _scan(self, a) -> list[Hit]:
         hits: dict[str, Hit] = {}
@@ -132,10 +156,14 @@ class Firewall:
         return 1.0 - safe
 
     def _early(self, message, source, code, reason) -> dict:
+        layers = {"rules": {"risk_score": 1.0, "blocked": True},
+                  "llm_judge": {"used": False, "reason": "blocked_before_judge"},
+                  "pipeline": "hybrid" if self.judge is not None else "rules_only"}
         return self._verdict(True, 1.0, self.cfg.block_threshold, [], None, [reason],
-                             message if isinstance(message, str) else "", source, code)
+                             message if isinstance(message, str) else "", source, code, layers)
 
-    def _verdict(self, blocked, risk, threshold, hits, intent, reasons, message, source, code=None) -> dict:
+    def _verdict(self, blocked, risk, threshold, hits, intent, reasons, message, source, code=None,
+                 layers=None) -> dict:
         cfg = self.cfg
         risk = round(min(max(risk, 0.0), 1.0), 3)
         seen, reason_list = set(), []
@@ -169,11 +197,14 @@ class Firewall:
             "reasons": reason_list,
             "message_sha256": hashlib.sha256(message.encode("utf-8", "ignore")).hexdigest()[:16],
             "firewall_version": VERSION,
+            "layers": layers or {"rules": {"risk_score": risk, "blocked": blocked},
+                                  "llm_judge": {"used": False}, "pipeline": "rules_only"},
         }
         if cfg.verbose:
             out["threats"] = [{"rule": h.id, "category": h.category, "weight": h.weight,
                                "variant": h.variant, "matched": h.matched} for h in hits]
-        else:  # don't teach an attacker which rule fired
+        else:  # don't teach an attacker which rule (or judge reasoning) fired
             out["reasons"] = ["Request blocked by security policy"] if blocked else ["OK"]
             out.pop("categories")
+            out["layers"] = {"pipeline": out["layers"].get("pipeline", "rules_only")}
         return out

@@ -59,6 +59,10 @@
     threatsBody: document.getElementById("threatsBody"),
     threatsTable: document.getElementById("threatsTable"),
     noThreats: document.getElementById("noThreats"),
+    pipelinePill: document.getElementById("pipelinePill"),
+    pipelinePillTop: document.getElementById("pipelinePillTop"),
+    layerRules: document.getElementById("layerRules"),
+    layerJudge: document.getElementById("layerJudge"),
     rawJson: document.getElementById("rawJson"),
     copyJson: document.getElementById("copyJson"),
     statTotal: document.getElementById("statTotal"),
@@ -130,11 +134,14 @@
     try {
       const resp = await fetch(API_BASE + "/health");
       if (!resp.ok) throw new Error("bad status");
+      const data = await resp.json();
       els.healthDot.className = "dot up";
       els.healthText.textContent = "online";
+      setPipelinePill(els.pipelinePillTop, data.pipeline);
     } catch (e) {
       els.healthDot.className = "dot down";
       els.healthText.textContent = "offline";
+      setPipelinePill(els.pipelinePillTop, null);
     }
   }
 
@@ -188,6 +195,7 @@
     els.statusBadge.textContent = "ERROR";
     els.statusBadge.className = "badge blocked";
     els.riskLevel.textContent = "server unreachable";
+    renderLayers(null);
   }
 
   function renderVerdict(v) {
@@ -236,6 +244,56 @@
     }
 
     els.rawJson.textContent = JSON.stringify(v, null, 2);
+    renderLayers(v.layers);
+  }
+
+  function setPipelinePill(el, mode) {
+    if (!el) return;
+    if (!mode) {
+      el.textContent = "unknown";
+      el.className = "pipeline-pill";
+      return;
+    }
+    el.textContent = mode === "hybrid" ? "hybrid (rules + LLM)" : "rules only";
+    el.className = "pipeline-pill " + mode;
+  }
+
+  function renderLayers(layers) {
+    layers = layers || {};
+    setPipelinePill(els.pipelinePill, layers.pipeline);
+
+    const rules = layers.rules;
+    if (rules) {
+      els.layerRules.className = "layer-card" + (rules.blocked ? " flagged" : "");
+      els.layerRules.querySelector(".layer-body").innerHTML =
+        `<div class="layer-row"><span>Risk score</span><span>${escapeHtml(rules.risk_score.toFixed(2))}</span></div>` +
+        `<div class="layer-row"><span>Would block</span><span>${rules.blocked ? "yes" : "no"}</span></div>`;
+    } else {
+      els.layerRules.className = "layer-card";
+      els.layerRules.querySelector(".layer-body").innerHTML = '<span class="muted">—</span>';
+    }
+
+    const judge = layers.llm_judge || { used: false };
+    const judgeBody = els.layerJudge.querySelector(".layer-body");
+    if (!judge.used) {
+      els.layerJudge.className = "layer-card";
+      const reason = judge.reason === "no_judge_configured"
+        ? "No ANTHROPIC_API_KEY — rules only"
+        : (judge.reason || "Not consulted for this request");
+      judgeBody.innerHTML = `<span class="muted">${escapeHtml(reason)}</span>`;
+    } else if (judge.error) {
+      els.layerJudge.className = "layer-card flagged";
+      judgeBody.innerHTML =
+        `<div class="layer-row"><span>Error</span><span>${escapeHtml(judge.error)}</span></div>` +
+        `<div class="layer-row"><span>Fail-closed</span><span>${judge.fail_closed ? "yes" : "no"}</span></div>`;
+    } else {
+      els.layerJudge.className = "layer-card" + (judge.attack ? " flagged" : " active");
+      judgeBody.innerHTML =
+        `<div class="layer-row"><span>Verdict</span><span>${judge.attack ? "attack" : "clean"}</span></div>` +
+        `<div class="layer-row"><span>Confidence</span><span>${escapeHtml(judge.confidence.toFixed(2))}</span></div>` +
+        (judge.category ? `<div class="layer-row"><span>Category</span><span>${escapeHtml(judge.category)}</span></div>` : "") +
+        (judge.reasoning ? `<div class="muted" style="margin-top:4px">${escapeHtml(judge.reasoning)}</div>` : "");
+    }
   }
 
   function renderActionResult(v) {

@@ -16,6 +16,7 @@
     </div>
   </div>
   <div class="health" id="health" role="status">
+    <span class="pipeline-pill" id="pipelinePillTop">—</span>
     <span class="dot" id="healthDot" aria-hidden="true"></span>
     <span id="healthText">checking…</span>
   </div>
@@ -115,6 +116,20 @@
       <div class="reasons-block">
         <h3>Reasons</h3>
         <ul id="reasonsList" class="reasons-list"></ul>
+      </div>
+
+      <div class="layers-block">
+        <h3>Pipeline layers <span class="pipeline-pill" id="pipelinePill">—</span></h3>
+        <div class="layers-grid" id="layersGrid">
+          <div class="layer-card" id="layerRules">
+            <div class="layer-title">Rules engine</div>
+            <div class="layer-body muted">—</div>
+          </div>
+          <div class="layer-card" id="layerJudge">
+            <div class="layer-title">LLM judge</div>
+            <div class="layer-body muted">—</div>
+          </div>
+        </div>
       </div>
 
       <div class="threats-block">
