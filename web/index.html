@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BankGuard — AI security firewall for banking assistants</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">🛡</span>
+    <div>
+      <h1>BankGuard</h1>
+      <p class="tagline">AI security firewall for banking assistants</p>
+    </div>
+  </div>
+  <div class="health" id="health" role="status">
+    <span class="dot" id="healthDot" aria-hidden="true"></span>
+    <span id="healthText">checking…</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="col chat-col">
+    <div class="card chat-card">
+      <div class="card-header">
+        <h2>Banking Assistant</h2>
+        <div class="chat-options">
+          <label class="switch">
+            <input type="checkbox" id="strictToggle">
+            <span>Strict mode</span>
+          </label>
+          <label class="select-label">
+            Source
+            <select id="sourceSelect">
+              <option value="user">user</option>
+              <option value="document">document</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div class="chat-window" id="chatWindow" aria-live="polite"></div>
+
+      <form class="chat-input-row" id="chatForm">
+        <label for="chatInput" class="sr-only">Message to the banking assistant</label>
+        <input id="chatInput" name="message" type="text" autocomplete="off"
+               placeholder="Ask your banking assistant something…">
+        <button type="submit" id="sendBtn">Send</button>
+      </form>
+    </div>
+
+    <div class="card action-card" id="actionCard">
+      <h2>Bank action</h2>
+      <div id="actionResult" class="action-result muted">No request sent yet.</div>
+    </div>
+
+    <div class="card quicktest-card">
+      <h2>Quick tests</h2>
+      <div class="quicktest-group">
+        <h3>Genuine requests</h3>
+        <div class="chip-row" id="genuineChips"></div>
+      </div>
+      <div class="quicktest-group">
+        <h3>Attacks</h3>
+        <div class="chip-row" id="attackChips"></div>
+      </div>
+    </div>
+
+    <div class="card history-card">
+      <div class="card-header">
+        <h2>History</h2>
+        <button type="button" id="clearHistory" class="btn-ghost">Clear</button>
+      </div>
+      <div class="table-scroll">
+        <table class="history-table">
+          <thead>
+            <tr><th>Time</th><th>Message</th><th>Status</th><th>Score</th></tr>
+          </thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="col inspector-col">
+    <div class="card inspector-card" aria-live="polite">
+      <h2>Firewall inspector</h2>
+
+      <div class="badge-row">
+        <span class="badge" id="statusBadge">—</span>
+        <span class="risk-level" id="riskLevel"></span>
+      </div>
+
+      <div class="gauge-wrap">
+        <div class="gauge-label">
+          <span>Risk score</span>
+          <span id="gaugeValue">0.00</span>
+        </div>
+        <div class="gauge-track">
+          <div class="gauge-fill" id="gaugeFill"></div>
+          <div class="gauge-threshold" id="gaugeThreshold"></div>
+        </div>
+        <div class="gauge-scale"><span>0</span><span>0.5</span><span>1</span></div>
+      </div>
+
+      <dl class="verdict-grid">
+        <div><dt>Intent</dt><dd id="intentName">—</dd></div>
+        <div><dt>High risk</dt><dd id="highRisk">—</dd></div>
+        <div><dt>Threshold</dt><dd id="thresholdVal">—</dd></div>
+        <div><dt>Amounts</dt><dd id="amountsVal">—</dd></div>
+      </dl>
+
+      <div class="reasons-block">
+        <h3>Reasons</h3>
+        <ul id="reasonsList" class="reasons-list"></ul>
+      </div>
+
+      <div class="threats-block">
+        <h3>Threats detected</h3>
+        <div class="table-scroll">
+          <table class="threats-table" id="threatsTable">
+            <thead>
+              <tr><th>Rule</th><th>Category</th><th>Weight</th><th>Variant</th><th>Matched</th></tr>
+            </thead>
+            <tbody id="threatsBody"></tbody>
+          </table>
+        </div>
+        <p class="muted" id="noThreats">No threats detected.</p>
+      </div>
+
+      <details class="raw-json">
+        <summary>Raw JSON</summary>
+        <button type="button" id="copyJson" class="btn-ghost">Copy</button>
+        <pre id="rawJson">—</pre>
+      </details>
+    </div>
+
+    <div class="card stats-card">
+      <h2>Stats</h2>
+      <div class="stats-strip" id="statsStrip">
+        <div><span class="stat-value" id="statTotal">0</span><span class="stat-label">Checked</span></div>
+        <div><span class="stat-value" id="statAllowed">0</span><span class="stat-label">Allowed</span></div>
+        <div><span class="stat-value" id="statBlocked">0</span><span class="stat-label">Blocked</span></div>
+        <div><span class="stat-value" id="statLatency">0 ms</span><span class="stat-label">Avg latency</span></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
