@@ -369,6 +369,29 @@ tbody tr:hover { background: var(--panel-2); }
   margin-bottom: 6px;
 }
 
+.gauge-track-wrap {
+  position: relative;
+  /* Room above the track for the floating threshold label. */
+  margin-top: 18px;
+}
+
+.gauge-threshold-label {
+  position: absolute;
+  top: -18px;
+  left: 60%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 5px;
+  white-space: nowrap;
+  pointer-events: none;
+  transition: left 0.2s ease;
+}
+
 .gauge-track {
   position: relative;
   height: 10px;
@@ -393,6 +416,22 @@ tbody tr:hover { background: var(--panel-2); }
   width: 2px;
   background: var(--text);
   left: 60%;
+  transition: left 0.2s ease;
+}
+
+.gauge-marker {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 2px solid var(--bg);
+  box-shadow: 0 0 0 1px var(--border);
+  transform: translate(-50%, -50%);
+  transition: left 0.2s ease;
+  z-index: 1;
 }
 
 .gauge-scale {

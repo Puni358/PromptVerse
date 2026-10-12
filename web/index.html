@@ -99,9 +99,13 @@
           <span>Risk score</span>
           <span id="gaugeValue">0.00</span>
         </div>
-        <div class="gauge-track">
-          <div class="gauge-fill" id="gaugeFill"></div>
-          <div class="gauge-threshold" id="gaugeThreshold"></div>
+        <div class="gauge-track-wrap">
+          <span class="gauge-threshold-label" id="gaugeThresholdLabel">block at 0.60</span>
+          <div class="gauge-track" id="gaugeTrack" role="img" aria-label="Risk score 0.00 out of 1, block threshold 0.60">
+            <div class="gauge-fill" id="gaugeFill"></div>
+            <div class="gauge-threshold" id="gaugeThreshold"></div>
+            <div class="gauge-marker" id="gaugeMarker" aria-hidden="true"></div>
+          </div>
         </div>
         <div class="gauge-scale"><span>0</span><span>0.5</span><span>1</span></div>
       </div>

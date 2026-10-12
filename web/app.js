@@ -51,6 +51,9 @@
     gaugeValue: document.getElementById("gaugeValue"),
     gaugeFill: document.getElementById("gaugeFill"),
     gaugeThreshold: document.getElementById("gaugeThreshold"),
+    gaugeThresholdLabel: document.getElementById("gaugeThresholdLabel"),
+    gaugeMarker: document.getElementById("gaugeMarker"),
+    gaugeTrack: document.getElementById("gaugeTrack"),
     intentName: document.getElementById("intentName"),
     highRisk: document.getElementById("highRisk"),
     thresholdVal: document.getElementById("thresholdVal"),
@@ -206,9 +209,22 @@
 
     const score = typeof v.risk_score === "number" ? v.risk_score : 0;
     const threshold = typeof v.threshold === "number" ? v.threshold : 0;
+    const scorePct = Math.min(100, Math.max(0, score * 100));
+    const thresholdPct = Math.min(100, Math.max(0, threshold * 100));
     els.gaugeValue.textContent = score.toFixed(2);
-    els.gaugeFill.style.width = Math.min(100, score * 100) + "%";
-    els.gaugeThreshold.style.left = Math.min(100, threshold * 100) + "%";
+    els.gaugeFill.style.width = scorePct + "%";
+    els.gaugeThreshold.style.left = thresholdPct + "%";
+    els.gaugeMarker.style.left = scorePct + "%";
+    els.gaugeThresholdLabel.textContent = "block at " + threshold.toFixed(2);
+    // Keep the floating label's horizontal position in sync with the rod, but clamp it so it
+    // can't be clipped off the edge of the track at very low/high thresholds.
+    els.gaugeThresholdLabel.style.left = Math.min(92, Math.max(8, thresholdPct)) + "%";
+    if (els.gaugeTrack) {
+      els.gaugeTrack.setAttribute(
+        "aria-label",
+        `Risk score ${score.toFixed(2)} out of 1, block threshold ${threshold.toFixed(2)}`
+      );
+    }
 
     const intent = v.intent || {};
     els.intentName.textContent = intent.name || "—";
