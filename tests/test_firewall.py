@@ -8,6 +8,11 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# Force rules-only before anything imports app_core/server (which build a real GeminiJudge
+# whenever a local .env or real env has GEMINI_API_KEY set) — tests must never touch the
+# network, regardless of what's sitting in a developer's local .env.
+os.environ["LLM_PROVIDER"] = "none"
+
 from bankguard import BlockedRequest, Config, Firewall, guarded, handle_request  # noqa: E402
 
 FW = Firewall()
@@ -288,9 +293,17 @@ class ServerStrictMode(unittest.TestCase):
         cls.httpd.shutdown()
         cls.httpd.server_close()
 
-    def _post(self, body):
+    def _post(self, body, path="/check"):
         conn = self.http_client.HTTPConnection("127.0.0.1", self.port)
-        conn.request("POST", "/check", json.dumps(body))
+        conn.request("POST", path, json.dumps(body))
+        resp = conn.getresponse()
+        data = json.loads(resp.read())
+        conn.close()
+        return resp.status, data
+
+    def _get(self, path):
+        conn = self.http_client.HTTPConnection("127.0.0.1", self.port)
+        conn.request("GET", path)
         resp = conn.getresponse()
         data = json.loads(resp.read())
         conn.close()
@@ -318,17 +331,28 @@ class ServerStrictMode(unittest.TestCase):
         self.assertEqual(data["status"], "safe")
 
     def test_rate_limit_returns_429_after_threshold(self):
-        import server as server_module
-        server_module._request_log.clear()
-        original_limit = server_module.RATE_LIMIT_PER_MIN
-        server_module.RATE_LIMIT_PER_MIN = 3
+        import app_core
+        app_core._request_log.clear()
+        original_limit = app_core.RATE_LIMIT_PER_MIN
+        app_core.RATE_LIMIT_PER_MIN = 3
         try:
             statuses = [self._post({"message": "what's my balance"})[0] for _ in range(5)]
         finally:
-            server_module.RATE_LIMIT_PER_MIN = original_limit
-            server_module._request_log.clear()
+            app_core.RATE_LIMIT_PER_MIN = original_limit
+            app_core._request_log.clear()
         self.assertEqual(statuses[:3], [200, 200, 200])
         self.assertEqual(statuses[3:], [429, 429])
+
+    def test_api_check_and_health_aliases_match_local_routes(self):
+        status_local, data_local = self._post({"message": "what's my balance"}, path="/check")
+        status_api, data_api = self._post({"message": "what's my balance"}, path="/api/check")
+        self.assertEqual(status_local, status_api)
+        self.assertEqual(data_local["status"], data_api["status"])
+
+        status_local, data_local = self._get("/health")
+        status_api, data_api = self._get("/api/health")
+        self.assertEqual((status_local, data_local), (status_api, data_api))
+        self.assertIn(data_local["pipeline"], ("rules_only", "hybrid"))
 
     def test_cors_headers_and_options(self):
         conn = self.http_client.HTTPConnection("127.0.0.1", self.port)

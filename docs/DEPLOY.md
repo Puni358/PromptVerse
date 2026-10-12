@@ -1,77 +1,105 @@
 # Deploying BankGuard
 
-The server is stdlib Python (`http.server`), binds `0.0.0.0:$PORT`, and serves both the
-`/check` + `/health` API and the static demo UI (`web/`) from the same process — one service,
-no reverse proxy required.
+The project ships two equivalent entrypoints that share one request-handling module
+(`app_core.py`), so local dev and production never drift apart:
 
-## Option A — Render (recommended, matches `render.yaml`)
+- **Local dev**: `python server.py` — a stdlib `http.server` that serves `/check`, `/health`,
+  `/api/check`, `/api/health`, and the static `web/` demo UI from one process.
+- **Production (Vercel)**: `api/check.py` and `api/health.py` — Python serverless functions
+  (Vercel's documented `BaseHTTPRequestHandler`-based runtime) under `/api/*`, with `web/`
+  served as static assets via `vercel.json`'s `outputDirectory`.
 
-1. Push this repo to GitHub (or GitLab).
-2. In the Render dashboard: **New → Blueprint**, point it at the repo. Render reads
-   `render.yaml` and creates a `bankguard-firewall` web service from the `Dockerfile`.
-3. Set `ANTHROPIC_API_KEY` in the service's **Environment** tab if you want the hybrid
-   rules+LLM pipeline (optional — the service works rules-only without it, see
-   `docs/ARCHITECTURE.md`). It is declared `sync: false` in `render.yaml` specifically so it
-   is never read from a committed file.
-4. Deploy. Render builds the Docker image, runs `python server.py`, and health-checks
-   `GET /health`.
-5. Your public URL is `https://<service-name>.onrender.com`. Open it directly — that serves
-   `web/index.html`, which calls `/check` and `/health` on the same origin.
+## Deploy to Vercel
 
-No `render.yaml`? Create the service manually instead: **New → Web Service**, environment
-**Docker**, same env vars as above, health check path `/health`.
+1. Push this repo to GitHub.
+2. In the Vercel dashboard: **Add New → Project**, import the repo. Vercel detects
+   `api/*.py` as Python Serverless Functions automatically (no framework preset needed —
+   pick "Other" if asked) and reads `vercel.json` for the rest.
+3. Under **Settings → Environment Variables**, add `GEMINI_API_KEY` (get one at
+   [aistudio.google.com/apikey](https://aistudio.google.com/apikey)). Optionally add
+   `GEMINI_MODEL` (see `.env.example` for the current verified default) and
+   `RATE_LIMIT_PER_MIN`. Never commit these — `vercel.json` carries no secrets, by design.
+4. Deploy. Vercel builds `api/check.py` and `api/health.py` as separate functions and serves
+   `web/`'s contents as the static site root (via `outputDirectory: "web"` in `vercel.json`).
+5. Test:
+   ```bash
+   curl https://<your-project>.vercel.app/api/health
+   curl https://<your-project>.vercel.app/api/check -d '{"message":"Transfer $50 to savings"}'
+   ```
+   Then open `https://<your-project>.vercel.app/` — the demo UI calls `/api/check` and
+   `/api/health` with relative URLs, so it works identically on Vercel and on `localhost:8080`
+   without any config change (see `web/app.js`'s `API_BASE`).
 
-## Option B — Docker, anywhere
+No `vercel.json`, or want to configure by hand instead: set the framework preset to "Other",
+output directory to `web`, and leave the build command empty (there is no build step — this is
+plain HTML/CSS/JS and stdlib Python).
+
+**I could not run an actual Vercel deploy from this sandbox** (no Vercel account access here).
+Everything above follows Vercel's current documented Python runtime contract — a top-level
+`handler` class per file in `api/`, subclassing `BaseHTTPRequestHandler` — which I verified
+against vercel.com/docs/functions/runtimes/python before writing `api/check.py` and
+`api/health.py`. Confirm `/api/health` responds correctly on your first real deploy before
+relying on it.
+
+## Local dev
 
 ```bash
-docker build -t bankguard-firewall .
-docker run -p 8080:8080 \
-  -e PORT=8080 \
-  -e BANKGUARD_VERBOSE=1 \
-  -e RATE_LIMIT_PER_MIN=30 \
-  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-  bankguard-firewall
+cp .env.example .env    # fill in GEMINI_API_KEY (or leave LLM_PROVIDER=none for rules-only)
+python server.py
 ```
 
-Open `http://localhost:8080`. This is the same image Render builds, so it's a good way to
-reproduce a deploy locally before pushing.
+Open `http://localhost:8080`. `server.py` reads `.env` via `bankguard/envfile.py` at startup
+(a real environment variable always takes precedence over the file, so this is safe to leave
+in place when you later `export` the same vars for a different test).
 
-## Option C — Plain Python, no container
-
-```bash
-pip install -r requirements.txt   # optional — only needed for the hybrid judge
-PORT=8080 ANTHROPIC_API_KEY=... python server.py
-```
+You can also run `vercel dev` locally if you have the Vercel CLI installed — it should execute
+`api/check.py` / `api/health.py` exactly as deployed and serve `web/` the same way
+`outputDirectory` does in production. This wasn't verified from this sandbox either (no CLI
+installed here); if `vercel dev` behaves differently from `server.py` for you, trust
+`vercel dev` as the source of truth for what Vercel actually does, and file that as a gap in
+this doc.
 
 ## Environment variables
 
-See `.env.example` for the full list with descriptions: `PORT`, `BANKGUARD_VERBOSE`,
-`ANTHROPIC_API_KEY`, `RATE_LIMIT_PER_MIN`. Copy it to `.env` for local reference — `.env` is
-gitignored and `server.py` reads the real environment, not the file, so either `export` the
-values yourself or use a tool like `python-dotenv` / your shell's `set -a; source .env; set +a`.
+See `.env.example` for the full list with descriptions: `PORT` (local dev only), `BANKGUARD_VERBOSE`,
+`LLM_PROVIDER`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `RATE_LIMIT_PER_MIN`.
 
 ## What's in place for production use
 
 - **CORS**: `Access-Control-Allow-Origin: *` on every response, `OPTIONS` handled, so the
-  demo UI (or any frontend) can call `/check` cross-origin.
-- **Rate limiting**: a per-IP fixed window on `POST /check` (`RATE_LIMIT_PER_MIN`, default 30
-  req/min), returns `429` over the limit. In-memory, so it resets on restart and is per
-  instance — fine for a single-instance demo deploy, not a substitute for an edge rate
-  limiter (e.g. Render's/Cloudflare's) at real scale.
-- **Fail-closed firewall**: oversized payloads (>20KB), malformed JSON, and internal errors
-  all return non-200 rather than silently allowing a request through.
+  demo UI (or any frontend) can call `/api/check` cross-origin if hosted separately.
+- **Rate limiting**: a per-IP fixed window on `POST /check` / `/api/check`
+  (`RATE_LIMIT_PER_MIN`, default 30 req/min), returns `429` over the limit. **In-memory and
+  per-process** — see "What's out of scope" below, this matters more on Vercel than it does
+  for `server.py`.
+- **Fail-closed firewall**: oversized payloads (>20KB), malformed JSON, internal errors, and
+  (for high-risk/money-moving intents) an unreachable or erroring judge all return non-200
+  rather than silently allowing a request through.
+- **4s judge timeout**: `GeminiJudge` caps each call at 4 seconds and retries once on HTTP 429
+  with backoff, so a single `/api/check` invocation stays well inside Vercel's function time
+  limit even in the hybrid pipeline. Verified against the live Gemini API while building this:
+  `gemini-flash-lite-latest` responded in ~1.3–2.3s per call in testing (see
+  `.env.example`'s comment and `evals/RESULTS.md`'s hybrid latency column for real numbers).
 - **No secret echo**: account numbers are truncated to last-4 before they ever leave
   `bankguard/intent.py`; `Config(verbose=False)` additionally hides rule names, matched text,
   and judge reasoning from callers (set `BANKGUARD_VERBOSE=0` for a production deploy where
   callers shouldn't learn which rule fired).
+- **No key ever printed or logged**: `bankguard/envfile.py` and `bankguard/providers/gemini.py`
+  only ever reference the key to put it in a request header; errors are logged by exception
+  type, never by message/response body that could embed it.
 
 ## What's intentionally out of scope for this deploy
 
-- **TLS termination**: Render terminates TLS for you; a bare Docker/plain-Python deploy needs
-  a reverse proxy (nginx, Caddy) in front if you need HTTPS yourself.
-- **Horizontal scaling**: the in-memory rate limiter and single-threaded `HTTPServer` are
-  fine for a demo; a multi-instance production deploy would need a shared rate-limit store
-  (Redis) and a real WSGI/ASGI server.
+- **Rate limiting is per-instance, not global.** `app_core.py`'s `_request_log` is an
+  in-memory dict. On `server.py` (one long-running process) that's a real limit. On Vercel,
+  each function invocation *can* land on a different, often cold-started, instance — so the
+  limiter resets unpredictably and is closer to "soft" than "hard" in production. A real
+  multi-instance rate limit needs a shared store (e.g. Upstash Redis, which is the usual
+  Vercel-native pairing) — not implemented here.
+- **The in-memory judge cache is per-instance too**, for the same reason; it helps within a
+  warm instance's lifetime but isn't a shared cache across the fleet.
+- **TLS termination**: Vercel terminates TLS for you; the plain-Python `server.py` path has no
+  HTTPS of its own (fine for local dev, not for exposing `server.py` directly to the internet).
 - **Request logging / observability**: `log_message` is suppressed deliberately (keeps raw
   user text out of access logs); there's no structured logging or metrics export here — see
   `docs/JURY_QA.md` for how we'd add it.

@@ -1,59 +1,23 @@
-"""Tiny HTTP wrapper (stdlib only).
+"""Tiny HTTP wrapper (stdlib only) for local dev. Production deploys use the Vercel functions
+in api/check.py and api/health.py instead (see docs/DEPLOY.md) — both share the same setup
+and request logic via app_core.py, so behaviour never drifts between the two.
 
     python server.py            # listens on :8080, serves the demo UI at /
     curl -s localhost:8080/check -d '{"message":"Transfer $50 to savings"}'
+    curl -s localhost:8080/api/check -d '{"message":"Transfer $50 to savings"}'   # same route
 
 200 => safe, 403 => blocked, 400 => malformed request body.
 """
 import json
 import mimetypes
 import os
-import time
-from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from bankguard import Config, Firewall
-
-VERBOSE = os.environ.get("BANKGUARD_VERBOSE", "1") == "1"
-RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "30"))
-RATE_WINDOW_SECONDS = 60.0
-
-# Per-IP fixed window of request timestamps for /check. The server runs single-threaded
-# (plain HTTPServer), so no lock is needed around this shared state.
-_request_log: dict[str, deque] = defaultdict(deque)
-
-
-def _rate_limited(ip: str) -> bool:
-    now = time.monotonic()
-    log = _request_log[ip]
-    cutoff = now - RATE_WINDOW_SECONDS
-    while log and log[0] < cutoff:
-        log.popleft()
-    if len(log) >= RATE_LIMIT_PER_MIN:
-        return True
-    log.append(now)
-    return False
-
-
-def _build_judge():
-    """Hybrid (rules + LLM) when ANTHROPIC_API_KEY is set and the anthropic SDK is installed;
-    otherwise rules-only, and /check says so via verdict["layers"]["pipeline"]."""
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None
-    try:
-        from bankguard.llm_judge import ClaudeJudge
-        return ClaudeJudge()
-    except Exception as exc:  # missing `anthropic` package, bad key format, etc.
-        print(f"bankguard: ANTHROPIC_API_KEY set but judge unavailable ({exc!r}); running rules-only")
-        return None
-
-
-JUDGE = _build_judge()
-PIPELINE_MODE = "hybrid" if JUDGE is not None else "rules_only"
-FW = Firewall(Config(verbose=VERBOSE), judge=JUDGE)
-FW_STRICT = Firewall(Config(verbose=VERBOSE, strict_intent=True), judge=JUDGE)
+from app_core import PIPELINE_MODE, client_ip, health_body, run_check
 
 WEB_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+_CHECK_PATHS = ("/check", "/api/check")
+_HEALTH_PATHS = ("/health", "/api/health")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -91,34 +55,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/health":
-            return self._send(200, {"status": "ok", "pipeline": PIPELINE_MODE})
+        if self.path in _HEALTH_PATHS:
+            return self._send(200, health_body())
         if self.path == "/" or self.path == "":
             return self._send_file("index.html")
-        if self.path.startswith("/check") or self.path.startswith("/health"):
+        if self.path in _CHECK_PATHS or self.path.startswith("/api/"):
             return self._send(404, {"error": "not_found"})
         return self._send_file(self.path.lstrip("/"))
 
     def do_POST(self):
-        if self.path != "/check":
+        if self.path not in _CHECK_PATHS:
             return self._send(404, {"error": "not_found"})
-        if _rate_limited(self.client_address[0]):
-            return self._send(429, {"error": "rate_limited",
-                                    "message": f"Max {RATE_LIMIT_PER_MIN} requests/minute per client"})
         try:
             n = int(self.headers.get("Content-Length", 0))
             if n > 20_000:
                 return self._send(413, {"error": "payload_too_large"})
             body = json.loads(self.rfile.read(n) or b"{}")
-            msg, source = body.get("message"), body.get("source", "user")
-            if source not in ("user", "document", "tool", "web"):
-                source = "document"  # unknown origin => treat as untrusted
-            strict = bool(body.get("strict", False))
         except Exception:
             return self._send(400, {"error": "bad_request"})
-        fw = FW_STRICT if strict else FW
-        verdict = fw.check(msg, source=source)
-        self._send(200 if verdict["status"] == "safe" else 403, verdict)
+        status, verdict = run_check(body, client_ip(self.headers, self.client_address))
+        self._send(status, verdict)
 
     def log_message(self, *a):  # keep raw user text out of access logs
         pass

@@ -1,16 +1,21 @@
 """Evaluate the firewall against evals/dataset.jsonl.
 
-    python evals/run_evals.py                 # rules-only
-    ANTHROPIC_API_KEY=... python evals/run_evals.py   # also runs the hybrid pipeline (real API calls)
+    python evals/run_evals.py                 # rules-only (no GEMINI_API_KEY / LLM_PROVIDER=none)
+    GEMINI_API_KEY=... python evals/run_evals.py   # also runs the hybrid pipeline (real API calls)
 
 Reports accuracy, attack catch rate (recall on label="attack"), and false-positive rate
 (genuine messages wrongly blocked), overall and per category, for rules-only and — only when
-ANTHROPIC_API_KEY is set and the `anthropic` package is importable — for the hybrid pipeline.
+a Gemini judge can actually be built (see bankguard/judge.py) — for the hybrid pipeline.
 Writes evals/RESULTS.md. Never fabricates hybrid numbers: if no key is present, that section
 says so plainly instead of being silently omitted or guessed at.
+
+Hybrid runs are throttled (EVAL_THROTTLE_SECONDS, default 1.5s between real API calls — the
+Gemini free tier's per-minute limit is low) and cached in evals/cache.json (gitignored), keyed
+by message hash, so re-running the eval after a dataset tweak doesn't re-pay for unchanged rows.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -22,9 +27,58 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from bankguard import Config, Firewall  # noqa: E402
+from bankguard.envfile import load_dotenv  # noqa: E402
+from bankguard.judge import build_judge  # noqa: E402
+
+load_dotenv(ROOT / ".env")
 
 DATASET_PATH = ROOT / "evals" / "dataset.jsonl"
 RESULTS_PATH = ROOT / "evals" / "RESULTS.md"
+CACHE_PATH = ROOT / "evals" / "cache.json"
+THROTTLE_SECONDS = float(os.environ.get("EVAL_THROTTLE_SECONDS", "1.5"))
+
+
+class CachingThrottledJudge:
+    """Wraps a real judge for eval runs: persists results to disk keyed by message hash (so
+    repeat runs are free for unchanged rows) and rate-limits actual API calls. Never caches a
+    failure — if the wrapped judge raises, nothing is written and the exception propagates to
+    Firewall._check(), which already fails closed for high-risk intents."""
+
+    def __init__(self, judge, cache_path: Path, throttle_seconds: float):
+        self.judge = judge
+        self.cache_path = cache_path
+        self.throttle_seconds = throttle_seconds
+        self.cache: dict[str, dict] = self._load()
+        self._last_call = 0.0
+        self.api_calls = 0
+        self.cache_hits = 0
+
+    def _load(self) -> dict:
+        if self.cache_path.is_file():
+            try:
+                return json.loads(self.cache_path.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+        return {}
+
+    def _save(self):
+        self.cache_path.write_text(json.dumps(self.cache, indent=1, ensure_ascii=False),
+                                   encoding="utf-8")
+
+    def assess(self, message: str) -> dict:
+        key = hashlib.sha256(message.encode("utf-8", "ignore")).hexdigest()
+        if key in self.cache:
+            self.cache_hits += 1
+            return self.cache[key]
+        elapsed = time.monotonic() - self._last_call
+        if elapsed < self.throttle_seconds:
+            time.sleep(self.throttle_seconds - elapsed)
+        result = self.judge.assess(message)
+        self._last_call = time.monotonic()
+        self.api_calls += 1
+        self.cache[key] = result
+        self._save()
+        return result
 
 
 def load_dataset() -> list[dict]:
@@ -120,14 +174,19 @@ def render_misses(miss_rows: list[dict], label: str) -> str:
 
 
 def try_build_hybrid_firewall():
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None, "ANTHROPIC_API_KEY not set"
+    """Returns (Firewall | None, skip_reason | None). Never raises — a misconfigured
+    LLM_PROVIDER surfaces as a skip reason, same as a missing key, so the eval still runs
+    the rules-only pipeline and reports honestly instead of crashing."""
     try:
-        from bankguard.llm_judge import ClaudeJudge
-        judge = ClaudeJudge()
+        judge = build_judge()
     except Exception as exc:
-        return None, f"judge unavailable: {exc!r}"
-    return Firewall(Config(), judge=judge), None
+        return None, f"LLM_PROVIDER misconfigured: {exc!r}"
+    if judge is None:
+        if os.environ.get("LLM_PROVIDER", "gemini").lower() == "none":
+            return None, "LLM_PROVIDER=none"
+        return None, "GEMINI_API_KEY not set"
+    wrapped = CachingThrottledJudge(judge, CACHE_PATH, THROTTLE_SECONDS)
+    return Firewall(Config(), judge=wrapped), None
 
 
 def main():
@@ -142,10 +201,13 @@ def main():
     hybrid_fw, hybrid_skip_reason = try_build_hybrid_firewall()
     hybrid_results = hybrid_summary = hybrid_misses_list = None
     if hybrid_fw is not None:
-        print("ANTHROPIC_API_KEY present — running hybrid pipeline (real API calls)...")
+        cached_judge: CachingThrottledJudge = hybrid_fw.judge
+        print(f"Running hybrid pipeline against Gemini (throttle={THROTTLE_SECONDS}s, "
+              f"cache={CACHE_PATH.relative_to(ROOT)})...")
         hybrid_results = run_pipeline(hybrid_fw, rows)
         hybrid_summary = summarize(hybrid_results, "category")
         hybrid_misses_list = misses(hybrid_results)
+        print(f"  {cached_judge.api_calls} live API calls, {cached_judge.cache_hits} cache hits")
     else:
         print(f"Skipping hybrid pipeline: {hybrid_skip_reason}")
 
@@ -155,8 +217,8 @@ def main():
                f"({sum(1 for r in rows if r['label'] == 'attack')} attack, "
                f"{sum(1 for r in rows if r['label'] == 'genuine')} genuine).\n")
     md.append("Generated by `evals/run_evals.py`. Numbers below are from an actual run against "
-               "the current rule engine (and the hybrid pipeline when a key is present) — not "
-               "hand-estimated.\n")
+               "the current rule engine (and the hybrid pipeline when a Gemini key is present) "
+               "— not hand-estimated.\n")
 
     md.append("## Rules-only pipeline\n")
     md.append(render_table(rules_summary))
@@ -164,17 +226,17 @@ def main():
     md.append("### Misses (rules-only)\n")
     md.append(render_misses(rules_misses, "rules-only"))
 
-    md.append("## Hybrid pipeline (rules + LLM judge)\n")
+    md.append("## Hybrid pipeline (rules + Gemini judge)\n")
     if hybrid_summary is not None:
         md.append(render_table(hybrid_summary))
         md.append("")
         md.append("### Misses (hybrid)\n")
         md.append(render_misses(hybrid_misses_list, "hybrid"))
     else:
-        md.append(f"**Not run in this report: {hybrid_skip_reason}.** Set `ANTHROPIC_API_KEY` "
-                   "(and `pip install anthropic`) and re-run `python evals/run_evals.py` to "
-                   "populate this section with real hybrid numbers. This report does not "
-                   "fabricate hybrid results in its absence.\n")
+        md.append(f"**Not run in this report: {hybrid_skip_reason}.** Set `GEMINI_API_KEY` "
+                   "(see `.env.example`) and re-run `python evals/run_evals.py` to populate "
+                   "this section with real hybrid numbers. This report does not fabricate "
+                   "hybrid results in its absence.\n")
 
     md.append("## Honest limitations\n")
     md.append(
@@ -188,6 +250,17 @@ def main():
         "rule engine keys on, used in ordinary banking sentences.\n"
         "- 184 rows is enough to catch gross regressions, not to produce statistically tight "
         "confidence intervals per category (some categories have as few as 10 rows).\n"
+        "- Hybrid numbers (when present) reflect a single live run against one Gemini model "
+        "snapshot at one point in time; LLM judge output is not perfectly deterministic even "
+        "at temperature 0, so a re-run may shift individual borderline verdicts slightly.\n"
+        "- **The judge only fires when the rule engine's own gate opens it** (high-risk intent "
+        "or a grey-zone rule score — see docs/PROMPT_FLOW.md). `intent.py`'s classifier is "
+        "English-keyword-regex based, so a message in Chinese/Japanese/Arabic/Russian asking "
+        "to move money is never flagged high-risk, scores 0 on the rules, and the judge never "
+        "sees it at all — in this run every hybrid miss in `multilingual_override` has "
+        "`risk=0.0`, meaning Gemini was never consulted, not that it missed. The fix is "
+        "widening `intent.py`'s patterns (or gating the judge on source/length heuristics too), "
+        "not tuning the judge prompt.\n"
     )
 
     RESULTS_PATH.write_text("\n".join(md), encoding="utf-8")
