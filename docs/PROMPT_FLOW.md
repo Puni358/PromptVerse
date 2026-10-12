@@ -6,21 +6,38 @@ matching the real code in `bankguard/firewall.py` and `bankguard/providers/gemin
 ## 1. Gate: does the judge get consulted at all?
 
 `Firewall._check()` (`bankguard/firewall.py`) computes the rule-engine score first, always.
-The judge is only called when:
+The judge is consulted if *any* of six conditions hold (first version of this doc only had the
+first and last — the rest were added specifically to close a multilingual gap found in
+`evals/RESULTS.md`, see below):
 
 ```python
-in_grey_zone = cfg.judge_band_low <= rules_risk < threshold   # 0.20 <= rules_risk < threshold
-should_consult = self.judge is not None and (intent["high_risk"] or in_grey_zone)
+triggers = []
+if intent["high_risk"]: triggers.append("high_risk_intent")
+if intent["name"] == "unknown": triggers.append("unknown_intent")
+if contains_non_latin_script(message): triggers.append("non_latin_script")
+if any(h.category == "obfuscation" for h in hits): triggers.append("obfuscation_detected")
+if source != "user": triggers.append("untrusted_source")
+if rules_risk >= cfg.judge_band_low: triggers.append("rules_risk_at_or_above_grey_zone")  # >= 0.20
+should_consult = self.judge is not None and bool(triggers)
 ```
 
-So: every high-risk intent (transfer, bill pay, profile/account change — `bankguard/intent.py`)
-gets a judge opinion regardless of how low the rule score is, *and* any message whose rule
-score lands in the 0.20–threshold grey zone gets one too, even if its intent isn't high-risk.
-A message with rule score 0 and a non-high-risk intent (e.g. "what's my balance?") never
-reaches the judge — there's nothing for it to add. This is also the biggest honestly-reported
-gap: `intent.py`'s classifier is English-keyword regex, so a non-English money-moving message
-can score 0 and never trigger a judge call either — see `evals/RESULTS.md`'s multilingual
-misses, all at `risk=0.0`.
+A message with rule score 0, a recognized non-high-risk intent, Latin script, no obfuscation
+flags, and `source="user"` is the one case that never reaches the judge — e.g. "what's my
+balance?" — because there's genuinely nothing for the judge to add there. Every other case now
+gets a second opinion even at rule score 0, specifically because **zero rules_risk is not
+evidence of safety for text the rule engine can't parse in the first place.** `triggers` is
+kept in the response as `layers.llm_judge.triggered_by`, so you can always see exactly why
+(or whether) the judge ran for a given message.
+
+**Why this got wider.** The original version only consulted for high-risk intent or the
+grey-zone band. `intent.py`'s classifier is English-keyword regex, so a non-English
+money-moving message scored 0 on both intent and rules and never reached the judge at all — the
+first eval run's own `multilingual_override` misses were all at `risk_score=0.0`, meaning
+Gemini was never asked, not that it answered wrong. Widening the intent classifier's language
+coverage (see `bankguard/intent.py`'s Hindi/Kannada/Tamil/Telugu/Hinglish/Spanish patterns) and
+widening this gate (non-Latin script, unknown intent, obfuscation, untrusted source) were both
+done to close that gap — `evals/RESULTS.md` reports whether it actually closed it or just
+narrowed it, including on `evals/heldout.jsonl`, a held-out set the gate wasn't tuned against.
 
 ## 2. What's actually sent to Gemini
 
@@ -90,9 +107,16 @@ each layer decided — not just the merged number.
 
 | Failure | What happens |
 |---|---|
-| HTTP 429 (rate limited) | One retry, honoring `Retry-After` if present, else `0.5 * 2^attempt`, capped at the 4s timeout. Second failure propagates. |
-| Timeout (4s) or any other exception | Propagates to `Firewall._check()`. For a **high-risk intent**, risk is forced to the threshold (fail closed — blocked). For a non-high-risk grey-zone message, the rules verdict (already below threshold) stands — an LLM outage doesn't block a low-stakes balance inquiry. |
+| HTTP 429 or a socket timeout | One retry. `GeminiJudge.timeout` (default 7s) is a **total** wall-clock budget across both attempts, not per-call — each attempt gets roughly half the remaining budget, so first-attempt-plus-retry stays well inside Vercel's 10s function limit. 429s additionally honor `Retry-After` if present, capped to what's left of the budget. Second failure propagates. |
+| Timeout or any other exception | Propagates to `Firewall._check()`. For a **high-risk intent**, risk is forced to the threshold (fail closed — blocked), and `layers.llm_judge.fail_closed` is set. For any other trigger (non-high-risk), the rules verdict stands as-is — an LLM outage doesn't block a low-stakes request. For a non-English message specifically, the blocked/safe verdict's `reasons` says so explicitly ("llm_judge unavailable for a non-English message..."), since a silent rules-only fallback is less reliable there by construction. |
 | `LLM_PROVIDER=none` or no `GEMINI_API_KEY` | `build_judge()` returns `None` before any of the above — the firewall runs rules-only, and every verdict's `layers.pipeline` says `"rules_only"` so this is never silently ambiguous. |
+
+This isn't just theoretical: the eval run behind the current `evals/RESULTS.md` numbers hit
+real timeouts under sustained load (hundreds of calls at a 1.5s throttle against a free-tier
+key) — a handful of genuine multilingual messages got fail-closed to `blocked` because the
+judge call for them specifically timed out, not because it misclassified them. Re-running just
+those rows individually afterward confirmed they classify correctly when the API isn't under
+that load. `evals/RESULTS.md` reports this honestly rather than hiding it behind a quiet re-run.
 
 ## 5. Caching
 

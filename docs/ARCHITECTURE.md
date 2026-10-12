@@ -13,9 +13,9 @@ flowchart TD
     D --> E[intent.py: classify_intent<br/>transfer / bill_pay / profile change<br/>= high_risk]
     E --> F{threshold<br/>high_risk: 0.40<br/>normal: 0.60<br/>source != user: min with 0.35}
     D --> F
-    F --> G{Consult LLM judge?<br/>high_risk OR<br/>0.20 <= rules_risk < threshold<br/>AND LLM_PROVIDER=gemini + GEMINI_API_KEY set}
+    F --> G{Consult LLM judge?<br/>high_risk OR unknown intent OR<br/>non-Latin script OR obfuscation flagged OR<br/>source != user OR rules_risk >= 0.20<br/>AND LLM_PROVIDER=gemini + GEMINI_API_KEY set}
     G -- no --> H[final_risk = rules_risk]
-    G -- yes --> I[GeminiJudge.assess<br/>prompts/judge_v1.md via REST<br/>generateContent + responseSchema<br/>4s timeout, retry once on 429]
+    G -- yes --> I[GeminiJudge.assess<br/>prompts/judge_v1.md via REST<br/>generateContent + responseSchema<br/>7s total budget, retry once on timeout/429]
     I -- ok --> J[final_risk = max rules_risk, judge_risk]
     I -- error + high_risk --> K[fail closed:<br/>final_risk = threshold]
     I -- error + not high_risk --> H

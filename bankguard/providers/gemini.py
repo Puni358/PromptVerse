@@ -30,16 +30,19 @@ _RESPONSE_SCHEMA = {
 class GeminiJudge:
     """.assess(message) -> {"attack", "confidence", "category", "reasoning", "risk_score"}.
 
-    Retries once on HTTP 429 with a short backoff (free-tier rate limits are low), applies a
-    hard `timeout` per HTTP call so the Firewall's overall latency budget is respected, and
-    caches results in memory keyed by a hash of the message (not the message itself, so raw
-    user text isn't retained longer than necessary in process memory beyond the request).
+    `timeout` is the TOTAL wall-clock budget across all attempts (default 7s), not per-call —
+    this matters because api/check.py runs as a Vercel function with a 10s limit, so the whole
+    judge call (including a retry) must finish with margin to spare. One retry on HTTP 429 or a
+    socket timeout, each attempt getting half the remaining budget, honoring `Retry-After` on
+    429 (capped to what's left). Caches results in memory keyed by a hash of the message (not
+    the message itself, so raw user text isn't retained longer than necessary in process memory
+    beyond the request).
     """
 
     API_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
     def __init__(self, api_key: str | None = None, model: str | None = None,
-                 timeout: float = 4.0, max_retries: int = 1, prompt_path: Path = PROMPT_PATH):
+                 timeout: float = 7.0, max_retries: int = 1, prompt_path: Path = PROMPT_PATH):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY is not set")
@@ -76,20 +79,36 @@ class GeminiJudge:
             headers={"Content-Type": "application/json", "x-goog-api-key": self.api_key},
         )
 
+        deadline = time.monotonic() + self.timeout
         attempt = 0
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("judge call exceeded its total timeout budget")
+            # Leave half the remaining budget for a possible retry, except on the last attempt.
+            per_attempt_timeout = remaining if attempt >= self.max_retries else remaining / 2
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                with urllib.request.urlopen(req, timeout=per_attempt_timeout) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
                 return self._parse(payload)
-            except urllib.error.HTTPError as exc:
-                if exc.code == 429 and attempt < self.max_retries:
+            except (urllib.error.HTTPError, TimeoutError, urllib.error.URLError) as exc:
+                is_429 = isinstance(exc, urllib.error.HTTPError) and exc.code == 429
+                is_timeout = isinstance(exc, TimeoutError) or (
+                    isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError))
+                if not (is_429 or is_timeout) or attempt >= self.max_retries:
+                    raise  # never logged with the request body/key — caller only sees the type
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                delay = 0.0
+                if is_429:
                     retry_after = exc.headers.get("Retry-After")
                     delay = float(retry_after) if retry_after else 0.5 * (2 ** attempt)
-                    time.sleep(min(delay, self.timeout))
-                    attempt += 1
-                    continue
-                raise  # never logged with the request body/key — caller only sees the type
+                delay = min(delay, max(remaining - 0.1, 0.0))  # leave time for the retry itself
+                if delay > 0:
+                    time.sleep(delay)
+                attempt += 1
+                continue
 
     @staticmethod
     def _parse(payload: dict) -> dict:

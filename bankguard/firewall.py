@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from .intent import classify_intent
-from .normalize import analyze
+from .normalize import analyze, contains_non_latin_script
 from .rules import RULES, SQUASHED_PHRASES
 
 VERSION = "1.0.0"
@@ -77,18 +77,37 @@ class Firewall:
 
         rules_risk = self._score(hits)
         risk = rules_risk
-
         reasons_extra = []
-        in_grey_zone = cfg.judge_band_low <= rules_risk < threshold
-        should_consult = self.judge is not None and (intent["high_risk"] or in_grey_zone)
+
+        # Why consult the judge at all? Any one of these is sufficient. A rule score of 0 is
+        # NOT evidence of safety for text the rule engine can't read in the first place (a
+        # non-Latin script, or anything already flagged as obfuscated/untrusted) — so those
+        # route to the judge even at risk 0, unlike the plain grey-zone case.
+        non_latin = contains_non_latin_script(message)
+        obfuscation_flagged = any(h.category == "obfuscation" for h in hits)
+        triggers = []
+        if intent["high_risk"]:
+            triggers.append("high_risk_intent")
+        if intent["name"] == "unknown":
+            triggers.append("unknown_intent")
+        if non_latin:
+            triggers.append("non_latin_script")
+        if obfuscation_flagged:
+            triggers.append("obfuscation_detected")
+        if source != "user":
+            triggers.append("untrusted_source")
+        if rules_risk >= cfg.judge_band_low:
+            triggers.append("rules_risk_at_or_above_grey_zone")
+        should_consult = self.judge is not None and bool(triggers)
 
         judge_layer: dict = {"used": False, "reason": "no_judge_configured" if self.judge is None
-                              else "not_high_risk_and_outside_grey_zone"}
+                              else "no_trigger_condition_met"}
         if should_consult:
             try:
                 result = self.judge.assess(message)
                 judge_layer = {
                     "used": True,
+                    "triggered_by": triggers,
                     "attack": result["attack"],
                     "confidence": round(float(result["confidence"]), 3),
                     "category": result.get("category", "none"),
@@ -98,8 +117,13 @@ class Firewall:
                 risk = max(risk, result["risk_score"])
                 reasons_extra.append("llm_judge consulted")
             except Exception as exc:
-                judge_layer = {"used": True, "error": type(exc).__name__}
-                reasons_extra.append("llm_judge unavailable")
+                judge_layer = {"used": True, "triggered_by": triggers, "error": type(exc).__name__}
+                if non_latin:
+                    reasons_extra.append(
+                        "llm_judge unavailable for a non-English message; rules-only verdict "
+                        "may be less reliable for this text")
+                else:
+                    reasons_extra.append("llm_judge unavailable")
                 if intent["high_risk"]:  # fail closed on money-moving actions
                     risk = max(risk, threshold)
                     judge_layer["fail_closed"] = True

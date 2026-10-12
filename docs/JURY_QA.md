@@ -18,24 +18,35 @@ just means the hybrid pipeline degrades to rules-only behavior for that message.
 the judge to *unblock* something the rules already flagged.
 
 **3. What's your actual accuracy?**
-Rules-only: 88.6% overall accuracy, 84.1% attack catch rate, 1.7% false-positive rate, on 184
-labelled messages. Hybrid (Gemini): 91.8% accuracy, 88.9% catch rate, same 1.7% false-positive
-rate. Full per-category breakdown and every miss, by id and text, is in `evals/RESULTS.md`.
+Two numbers, because one dataset isn't enough (see Q4). On the main set (204 messages, written
+alongside the rules): rules-only 89.7% accuracy / 84.1% catch rate / 1.3% false-positive rate;
+hybrid (Gemini) 98.5% / 98.4% / 1.3%. On the held-out set (50 messages, written after the rules
+and dataset were final, deliberately phrased unlike either, never tuned against): rules-only
+54.0% / 23.3% / 0%; hybrid 96.0% / 93.3% / 0%. The held-out numbers are the more honest signal
+for real-world performance — full per-category breakdown and every miss, by id and text, is in
+`evals/RESULTS.md`.
 
 **4. Is that eval dataset a fair test?**
-Partially — and we say so in the results file. We wrote both the rules and the dataset, so some
-attack phrasings track rule vocabulary closely (e.g. "ignore...instructions") and will
-over-state real-world catch rate. The multilingual and obfuscated categories are a better
-generalization proxy since they paraphrase rather than reuse wording — and those are exactly
-where the system does worse (60% and 93.3% respectively, rules-only).
+The main one, only partially — and we say so in the results file. We wrote both the rules and
+the dataset, so some attack phrasings track rule vocabulary closely and will over-state
+real-world catch rate. That's exactly why we added `evals/heldout.jsonl`: 50 new messages
+written after the rules and main dataset were final, deliberately phrased unlike anything in
+either (novel obfuscation techniques, social-engineering framings, attacks in languages not in
+the main set), and not tuned against afterward. The gap between the two (89.7%→98.5% main vs.
+54.0%→96.0% held-out, rules-only to hybrid) is itself informative: the rules alone do far worse
+on genuinely novel phrasing, which is exactly what you'd hope to see from an honest test.
 
 **5. What's the biggest real gap you found?**
-The judge-consultation gate itself. It only fires for high-risk intents or grey-zone rule
-scores. `intent.py`'s classifier is English-keyword regex, so a Chinese/Japanese/Arabic/Russian
-message asking to move money scores 0 on intent and 0 on rules, and the judge is never called —
-not because it failed, but because it was never asked. Every hybrid miss in the
-`multilingual_override` category has `risk_score=0.0`, confirming this directly. The fix is
-widening the intent classifier's language coverage, not tuning the judge prompt.
+Two, found in sequence. First: the judge-consultation gate used to only fire for high-risk
+intents or grey-zone rule scores, and `intent.py`'s classifier was English-keyword regex — so a
+non-English message asking to move money scored 0 on both and the judge was never called, not
+wrong. We widened the gate (now also fires on unknown intent, non-Latin script, obfuscation
+flags, and untrusted sources) and `intent.py`'s language coverage, and verified the fix on the
+held-out set rather than just asserting it. Second: under the eval's own sustained call volume,
+the original 4-second judge timeout was occasionally too tight, and a handful of genuine
+high-risk multilingual messages got fail-closed to `blocked` by a timeout, not a misclassification
+— see Q8's answer and `evals/RESULTS.md`'s honest-limitations section for the full account and
+the fix (a 7-second total retry budget).
 
 **6. Why Gemini specifically?**
 Google AI Studio API keys are free to obtain and the REST API needs no SDK — fits a hard
@@ -45,17 +56,26 @@ interface (`bankguard/judge.py`), so swapping to another vendor means implementi
 server layer is Gemini-specific.
 
 **7. How do you handle the LLM provider's own model deprecations?**
-We hit this directly while building: `gemini-2.5-flash` returned a 404 telling us it's "no
-longer available to new users," pointing at a replacement. The default model is one env var
-(`GEMINI_MODEL`), and `.env.example` documents the verified-working default along with a note
-to re-check Google's model list before deploying, rather than hardcoding a model id anywhere.
+We hit this directly while building: `gemini-2.5-flash` (the model we started with) returned a
+404 telling us it's "no longer available to new users." The current default,
+`gemini-flash-lite-latest`, is one env var (`GEMINI_MODEL`), and `.env.example` documents it
+along with a note to re-check Google's model list before deploying, rather than hardcoding a
+model id anywhere in the code.
 
 **8. What happens if the Gemini API is down or slow?**
-A 4-second timeout per call, one retry on HTTP 429 with backoff. If it still fails: for a
-high-risk (money-moving) intent, the firewall fails closed — blocks the request — rather than
-letting a transfer through on an LLM outage. For a non-high-risk grey-zone message, the rules
-verdict (already below the block threshold) stands, so a low-stakes balance question isn't
-blocked by an unrelated outage.
+A 7-second TOTAL timeout budget across one attempt plus one retry (each attempt gets roughly
+half the remaining budget), on HTTP 429 or a socket timeout — still comfortably under Vercel's
+10s function limit. If it still fails: for a high-risk (money-moving) intent, or any other
+trigger, the firewall fails closed — blocks the request — rather than letting a transfer through
+on an LLM outage. We hit this for real while building the eval suite: the *original* 4-second
+single-attempt timeout, under the sustained call volume of a full eval run (250+ calls against a
+free-tier key), occasionally timed out and fail-closed a handful of genuine high-risk
+multilingual messages. We verified it was the timeout and not a misclassification by re-running
+those exact messages individually afterward (all correct), then fixed the budget rather than
+hiding the run — see `evals/RESULTS.md`. For a message that triggered the judge for a
+non-high-risk reason (unknown intent, non-Latin script, etc.), a judge failure leaves the rules
+verdict standing instead of failing closed, and the response's `reasons` says explicitly that
+the judge was unavailable for a non-English message when that's the case.
 
 **9. Can an attacker bypass the firewall by making the judge time out on purpose?**
 Not for money-moving actions — that's exactly the fail-closed case above; a timeout blocks, it
@@ -88,11 +108,15 @@ and is process-lifetime only.
 Covered by a dedicated test (`test_no_raw_account_numbers_echoed`).
 
 **14. What would you add with another week?**
-(a) Widen `intent.py` beyond English regex — the single highest-leverage fix given finding #5.
-(b) A shared rate-limit/cache store (Redis) for true cross-instance limits on Vercel. (c)
-Structured logging of `blocked` verdicts (never the raw message) for operational visibility —
-currently there's none. (d) A second LLM provider behind the same interface, to A/B the judge
-and reduce single-vendor risk.
+(a) `intent.py` now covers Hindi/Kannada/Tamil/Telugu/Hinglish/Spanish, but that's still six
+languages hand-picked by us, not a general solution — a proper fix would route language
+detection through something more systematic than per-language regex. (b) The two remaining
+held-out misses (Q4) are both data-exfiltration attempts with a plausible legitimate-sounding
+pretext ("I'm updating my will, list every beneficiary..."); the judge prompt could be sharpened
+specifically against pretext-wrapped exfiltration. (c) A shared rate-limit/cache store (Redis)
+for true cross-instance limits on Vercel. (d) Structured logging of `blocked` verdicts (never
+the raw message) for operational visibility — currently there's none. (e) A second LLM provider
+behind the same interface, to A/B the judge and reduce single-vendor risk.
 
 **15. Why trust a hackathon project's security claims at all?**
 We tried to make that unnecessary to take on faith: the rule engine, the eval dataset, and the

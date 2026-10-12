@@ -28,6 +28,32 @@ _SPACED = re.compile(r"(?<![a-z0-9])(?:[a-z0-9][ .\-_*]){3,}[a-z0-9](?![a-z0-9])
 _B64_TOKEN = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/_-]{16,}={0,2}(?![A-Za-z0-9+/=_-])")
 _HEX_TOKEN = re.compile(r"(?<![0-9a-fA-F])(?:[0-9a-fA-F]{2}){10,}(?![0-9a-fA-F])")
 
+# Scripts the English-regex rule/intent engine can't natively read: used to route messages to
+# the LLM judge even when the rules see nothing (zero score on text they can't parse is not
+# evidence of safety). Devanagari (Hindi/Marathi), Kannada, Tamil, Telugu, Arabic, CJK
+# (Chinese/Japanese incl. Hiragana/Katakana), Hangul (Korean), Cyrillic (Russian etc).
+_NON_LATIN_SCRIPT = re.compile(
+    "[" +
+    "ऀ-ॿ"      # Devanagari
+    "ಀ-೿"      # Kannada
+    "஀-௿"      # Tamil
+    "ఀ-౿"      # Telugu
+    "؀-ۿݐ-ݿ"  # Arabic (+ supplement)
+    "一-鿿㐀-䶿"  # CJK Unified Ideographs (+ ext A)
+    "぀-ヿ"      # Hiragana / Katakana
+    "가-힣"      # Hangul
+    "Ѐ-ӿ"      # Cyrillic
+    "]"
+)
+
+
+def contains_non_latin_script(text: str) -> bool:
+    """True if `text` contains a character from a script the English-regex rule/intent engine
+    can't read (see _NON_LATIN_SCRIPT). Checked against the raw message, not the normalized
+    one — fold() only remaps a small set of Latin-look-alike confusables, so most genuine
+    non-Latin text (Hindi, Arabic, CJK, Cyrillic sentences) survives normalization intact."""
+    return bool(_NON_LATIN_SCRIPT.search(text))
+
 
 @dataclass
 class Analysis:

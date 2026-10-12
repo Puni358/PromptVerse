@@ -170,6 +170,46 @@ class GeminiJudgeClient(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError):
                 self.judge.assess("hello")
 
+    def test_retries_once_on_timeout_then_succeeds(self):
+        attempts = []
+
+        def fake_urlopen(req, timeout=None):
+            attempts.append(timeout)
+            if len(attempts) == 1:
+                raise TimeoutError("timed out")
+            return _fake_response({"attack": False, "confidence": 0.0, "category": "none", "reason": "fine"})
+
+        judge = GeminiJudge(api_key="fake-key", timeout=7.0, max_retries=1)
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            result = judge.assess("hello")
+
+        self.assertEqual(len(attempts), 2)
+        self.assertFalse(result["attack"])
+
+    def test_gives_up_after_max_retries_on_timeout(self):
+        def fake_urlopen(req, timeout=None):
+            raise TimeoutError("timed out")
+
+        judge = GeminiJudge(api_key="fake-key", timeout=7.0, max_retries=1)
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(TimeoutError):
+                judge.assess("hello")
+
+    def test_total_timeout_budget_stays_under_ten_seconds(self):
+        """Vercel's function limit is 10s; the judge's whole retry sequence (first attempt +
+        one retry) must fit comfortably inside that, not 2x the per-attempt timeout."""
+        judge = GeminiJudge(api_key="fake-key", timeout=7.0, max_retries=1)
+
+        def fake_urlopen(req, timeout=None):
+            # Each attempt must get roughly half the 7s budget, not the full 7s —
+            # otherwise two attempts could add up to 14s and blow past Vercel's limit.
+            self.assertLess(timeout, 7.0)
+            raise TimeoutError("timed out")
+
+        with mock.patch("bankguard.providers.gemini.urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(TimeoutError):
+                judge.assess("hello")
+
     def test_missing_api_key_raises_at_construction(self):
         # Other test modules importing app_core/server can populate os.environ from the
         # repo's local .env (load_dotenv never overwrites, but it does set unset vars), so

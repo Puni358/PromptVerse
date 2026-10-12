@@ -10,10 +10,22 @@ _FLAGS = re.I | re.M
 _INTENTS = [
     ("pay_bill", True, re.compile(
         r"\b(?:pay|settle|clear|pay off|payment)\b[^.\n]{0,30}\b(?:bill|bills|invoice|emi|premium|rent|dues|credit card|"
-        r"electricity|water|gas|utility|recharge|fee|fees|tuition)\b|\b(?:bill\s*pay(?:ment)?|recharge)\b", _FLAGS)),
+        r"electricity|water|gas|utility|recharge|fee|fees|tuition)\b|\b(?:bill\s*pay(?:ment)?|recharge)\b|"
+        # Hindi, Kannada, Tamil, Telugu, Hinglish, Spanish — common bill-payment phrasings.
+        r"बिल\s*(?:का\s*)?(?:भुगतान|भरें|भरना|जमा)|ಬಿಲ್\s*(?:ಪಾವತಿ|ಕಟ್ಟಿ)|பில்(?:\s*)?(?:செலுத்த|கட்ட)|"
+        r"బిల్లు\s*(?:చెల్లించ|కట్ట)|\bbill\s*(?:bharo|bharna|pay\s*karo)\b|\b(?:pagar|pago\s+de)\s+(?:la\s+)?factura\b",
+        _FLAGS)),
     ("transfer_funds", True, re.compile(
         r"\b(?:transfer|wire|remit|neft|rtgs|imps|upi)\b|"
-        r"\b(?:send|move|pay|give)\b[^.\n]{0,30}(?:\b(?:money|funds|amount|rupees|dollars|euros|inr|usd|rs\.?)\b|[$₹€£]\s?\d)", _FLAGS)),
+        r"\b(?:send|move|pay|give)\b[^.\n]{0,30}(?:\b(?:money|funds|amount|rupees|dollars|euros|inr|usd|rs\.?)\b|[$₹€£]\s?\d)|"
+        # Hindi, Kannada, Tamil, Telugu, Hinglish, Spanish — common "send/transfer money" phrasings.
+        r"पैसे?\s*(?:भेजो|भेजें|भेजना|ट्रांसफर)|रुपये?\s*भेज|ट्रांसफर\s*(?:करो|करें|कीजिए)|"
+        r"ಹಣ\s*ಕಳುಹಿಸ|ವರ್ಗಾವಣೆ\s*ಮಾಡ|"
+        r"பணம்\s*அனுப்ப|பரிமாற்ற|"
+        r"డబ్బు\s*పంప|బదిలీ\s*చేయ|"
+        r"\bpaise\s*(?:bhejo|bhejna|transfer)\b|\bpaisa\s*transfer\b|\btransfer\s*karo\b|"
+        r"\btransferir\s+dinero\b|\benviar\s+dinero\b|\bhacer\s+una\s+transferencia\b",
+        _FLAGS)),
     ("update_account_details", True, re.compile(
         r"\b(?:change|update|edit|modify|add|remove|set|reset)\b[^.\n]{0,25}\b(?:address|phone|mobile|email|beneficiary|"
         r"payee|nominee|password|pin|username|login)\b", _FLAGS)),
@@ -23,7 +35,15 @@ _INTENTS = [
         r"\b(?:block|freeze|unblock|activate|cancel|replace|report)\b[^.\n]{0,20}\b(?:card|debit|credit)\b|"
         r"\b(?:lost|stolen)\b[^.\n]{0,15}\bcard\b|\bcard\b[^.\n]{0,20}\b(?:lost|stolen|blocked|limit)\b", _FLAGS)),
     ("check_balance", False, re.compile(
-        r"\b(?:balance|how much (?:money|do i have)|available funds)\b", _FLAGS)),
+        r"\b(?:balance|how much (?:money|do i have)|available funds)\b|"
+        # Hindi, Kannada, Tamil, Telugu, Hinglish, Spanish — common "what's my balance" phrasings.
+        r"(?:मेरा\s*)?बैलेंस|शेष\s*राशि|खाते\s*में\s*कितना|"
+        r"ಬ್ಯಾಲೆನ್ಸ್|ಶಿಲ್ಕು|ಖಾತೆಯಲ್ಲಿ\s*ಎಷ್ಟಿದೆ|"
+        r"இருப்பு|பேலன்ஸ்|கணக்கில்\s*எவ்வளவு|"
+        r"బ్యాలెన్స్|మిగులు|ఖాతాలో\s*ఎంత|"
+        r"\bmera\s*balance\b|\bbalance\s*kitna\s*hai\b|"
+        r"\b(?:cu[aá]l\s+es\s+mi\s+saldo|cu[aá]nto\s+dinero\s+tengo|mi\s+saldo)\b",
+        _FLAGS)),
     ("transaction_history", False, re.compile(
         r"\b(?:transactions?|statements?|history|passbook|mini statement|spent|spending)\b", _FLAGS)),
     ("loan_enquiry", False, re.compile(

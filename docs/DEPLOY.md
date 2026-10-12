@@ -75,11 +75,14 @@ See `.env.example` for the full list with descriptions: `PORT` (local dev only),
 - **Fail-closed firewall**: oversized payloads (>20KB), malformed JSON, internal errors, and
   (for high-risk/money-moving intents) an unreachable or erroring judge all return non-200
   rather than silently allowing a request through.
-- **4s judge timeout**: `GeminiJudge` caps each call at 4 seconds and retries once on HTTP 429
-  with backoff, so a single `/api/check` invocation stays well inside Vercel's function time
-  limit even in the hybrid pipeline. Verified against the live Gemini API while building this:
-  `gemini-flash-lite-latest` responded in ~1.3–2.3s per call in testing (see
-  `.env.example`'s comment and `evals/RESULTS.md`'s hybrid latency column for real numbers).
+- **7s total judge timeout budget**: `GeminiJudge` caps the *entire* retry sequence (one
+  attempt + one retry on timeout/429) at 7 seconds total, not per call — each attempt gets
+  roughly half the remaining budget — so a single `/api/check` invocation stays comfortably
+  inside Vercel's 10s function limit even in the hybrid pipeline. Verified against the live
+  Gemini API while building this: `gemini-flash-lite-latest` responded in ~1.3–2.3s per call
+  under normal load, but a sustained-load eval run did hit real timeouts (see
+  `evals/RESULTS.md`'s honest note on that run) — the 7s budget (up from an initial 4s) exists
+  specifically because 4s was occasionally too tight.
 - **No secret echo**: account numbers are truncated to last-4 before they ever leave
   `bankguard/intent.py`; `Config(verbose=False)` additionally hides rule names, matched text,
   and judge reasoning from callers (set `BANKGUARD_VERBOSE=0` for a production deploy where
