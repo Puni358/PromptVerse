@@ -132,7 +132,7 @@
 
   async function checkHealth() {
     try {
-      const resp = await fetch(API_BASE + "/health");
+      const resp = await fetch(API_BASE + "/api/health");
       if (!resp.ok) throw new Error("bad status");
       const data = await resp.json();
       els.healthDot.className = "dot up";
@@ -161,7 +161,7 @@
 
     let verdict;
     try {
-      const resp = await fetch(API_BASE + "/check", {
+      const resp = await fetch(API_BASE + "/api/check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, source, strict }),
